@@ -96,3 +96,11 @@ supabase.channel('session-' + id)
 ```
 
 Realtime is enabled for `sessions`, `events`, `approvals`, `artifacts`, `sandboxes` (see `supabase/migrations/`).
+
+## AI providers (free tiers)
+
+Set `OPENROUTER_API_KEY` and/or `GEMINI_API_KEY` (see `.env.example`). With at least one set, sessions run the
+real agent in `src/orchestrator/agent.ts`; with none, the canned stub runs. Providers are tried in order and a
+429/error falls through to the next. `POST /sessions` accepts an optional `agent: { slug, name, systemPrompt }`
+(the specialist personas from agency-agents) which becomes the system prompt for that session.
+The agent cannot yet execute code or touch a repo, and its prompt says so.

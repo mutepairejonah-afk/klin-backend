@@ -4,6 +4,8 @@ import crypto from 'node:crypto';
 import { supabaseAdmin } from '../lib/supabase.js';
 import { emitEvent, subscribe, unsubscribe } from '../lib/eventBus.js';
 import { runStubOrchestrator } from '../orchestrator/stub.js';
+import { runAgent } from '../orchestrator/agent.js';
+import { llmConfigured } from '../lib/llm.js';
 import { appendAudit } from '../lib/audit.js';
 
 const router = Router();
@@ -42,6 +44,7 @@ const createSchema = z.object({
   repo: z.string().optional(),
   branch: z.string().optional(),
   connectors: z.array(z.string()).optional(),
+  agent: z.object({ slug: z.string(), name: z.string(), systemPrompt: z.string().max(60_000) }).optional(),
 });
 
 // POST /sessions
@@ -71,7 +74,7 @@ router.post('/', async (req, res) => {
   // Kick off the orchestrator. Swap runStubOrchestrator for the real
   // agent loop (OpenHands or equivalent) once §5/§7 are wired up — the
   // session/event persistence and SSE fan-out around it don't change.
-  runStubOrchestrator(data.id, input.goal).catch((err) => console.error('orchestrator error', err));
+  (llmConfigured() ? runAgent(data.id, input.goal, input.agent) : runStubOrchestrator(data.id, input.goal)).catch((err) => console.error('orchestrator error', err));
 
   res.status(201).json(toSessionDTO(data));
 });
