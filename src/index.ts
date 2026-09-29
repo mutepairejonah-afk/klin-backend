@@ -12,6 +12,13 @@ import schedulesRoutes from './routes/schedules.js';
 import artifactsRoutes, { usageRouter, auditRouter } from './routes/library.js';
 import { settingsRouter, membersRouter, memoryRouter } from './routes/orgAdmin.js';
 import sandboxesRoutes from './routes/sandboxes.js';
+import swaggerUi from 'swagger-ui-express';
+import YAML from 'yaml';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const app = express();
 
@@ -24,6 +31,14 @@ app.use(attachAuth); // populates req.user/db/orgId/role when a session cookie i
 // and signout must all work while logged out.
 app.use('/api/auth', authRoutes);
 app.use('/api/share', shareRoutes); // unauthenticated, token-scoped
+
+// Interactive API docs at /api/docs — public, same openapi.yaml published to GitHub Pages.
+try {
+  const spec = YAML.parse(fs.readFileSync(path.join(__dirname, '..', 'docs', 'openapi.yaml'), 'utf8'));
+  app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(spec));
+} catch (e) {
+  console.error('failed to load openapi.yaml for /api/docs', e);
+}
 
 // Everything below requires a valid session + org membership.
 app.use('/api', requireAuth);

@@ -1,0 +1,353 @@
+openapi: 3.0.3
+info:
+  title: klin API (kiln-api)
+  version: "1.0.0"
+  description: |
+    REST + SSE backend for klin. Auth is a Supabase session cookie set by the
+    OAuth callback below — there is no separate bearer token for the browser client.
+    All routes except `/api/auth/*`, `/api/share/*` and `/healthz` require a
+    signed-in session with org membership (enforced by RLS at the database level).
+servers:
+  - url: https://kiln-api-2lhz.onrender.com
+    description: Production (Render)
+  - url: http://localhost:8787
+    description: Local dev
+tags:
+  - name: auth
+  - name: sessions
+  - name: connections
+  - name: schedules
+  - name: library
+  - name: settings
+  - name: sandboxes
+  - name: share
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: kiln_session
+  schemas:
+    Session:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        userId: { type: string, format: uuid }
+        goal: { type: string }
+        status: { type: string, enum: [planning, executing, verifying, done, failed, paused] }
+        sandboxId: { type: string, nullable: true }
+        repo: { type: string, nullable: true }
+        branch: { type: string, nullable: true }
+        jobId: { type: string, nullable: true }
+        connectors: { type: array, items: { type: string } }
+        costUsd: { type: number, nullable: true }
+        durationSec: { type: integer, nullable: true }
+        createdAt: { type: string, format: date-time }
+        endedAt: { type: string, format: date-time, nullable: true }
+    AgentPersona:
+      type: object
+      description: A specialist persona (from agency-agents) applied as the session's system prompt.
+      required: [slug, name, systemPrompt]
+      properties:
+        slug: { type: string, example: engineering-frontend-developer }
+        name: { type: string, example: Frontend Developer }
+        systemPrompt: { type: string }
+    CreateSessionInput:
+      type: object
+      required: [goal]
+      properties:
+        goal: { type: string }
+        jobId: { type: string, nullable: true }
+        repo: { type: string }
+        branch: { type: string }
+        connectors: { type: array, items: { type: string } }
+        agent: { $ref: '#/components/schemas/AgentPersona' }
+    SessionEvent:
+      type: object
+      properties:
+        seq: { type: integer }
+        ts: { type: string, format: date-time }
+        type: { type: string, example: thought }
+        payload: { type: object }
+    Artifact:
+      type: object
+      properties:
+        id: { type: string }
+        sessionId: { type: string }
+        kind: { type: string, enum: [pr, diff, file, log] }
+        title: { type: string }
+        meta: { type: string, nullable: true }
+        url: { type: string, nullable: true }
+        createdAt: { type: string, format: date-time }
+    Connection:
+      type: object
+      properties:
+        id: { type: string }
+        connected: { type: boolean }
+        meta: { type: object, nullable: true }
+        lastUsedAt: { type: string, format: date-time, nullable: true }
+    Schedule:
+      type: object
+      properties:
+        id: { type: string }
+        jobId: { type: string }
+        cron: { type: string }
+        repo: { type: string, nullable: true }
+        enabled: { type: boolean }
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+security:
+  - sessionCookie: []
+paths:
+  /healthz:
+    get:
+      summary: Liveness check
+      security: []
+      tags: [auth]
+      responses:
+        '200': { description: OK }
+  /api/auth/{provider}/start:
+    get:
+      summary: Begin OAuth sign-in (github or google)
+      security: []
+      tags: [auth]
+      parameters:
+        - { name: provider, in: path, required: true, schema: { type: string, enum: [github, google] } }
+      responses:
+        '302': { description: Redirect to the provider }
+  /api/auth/callback:
+    get:
+      summary: OAuth callback; sets the session cookie and redirects to the frontend
+      security: []
+      tags: [auth]
+      responses:
+        '302': { description: Redirect to the frontend }
+  /api/auth/me:
+    get:
+      summary: Current signed-in user
+      tags: [auth]
+      responses:
+        '200': { description: OK }
+  /api/auth/signout:
+    post:
+      summary: Clear the session cookie
+      tags: [auth]
+      responses:
+        '200': { description: OK }
+  /api/sessions:
+    get:
+      summary: List sessions for the current org
+      tags: [sessions]
+      parameters:
+        - { name: status, in: query, schema: { type: string } }
+        - { name: repo, in: query, schema: { type: string } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/Session' } }
+    post:
+      summary: Create a session and start the agent
+      description: Runs the real agent (OpenRouter → Gemini → Claude, first configured/available) if any AI provider key is set on the server, otherwise a canned demo.
+      tags: [sessions]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateSessionInput' }
+      responses:
+        '200':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Session' }
+        '400': { description: Invalid input, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+  /api/sessions/{id}:
+    get:
+      summary: Get a session
+      tags: [sessions]
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Session' } } } }
+  /api/sessions/{id}/events:
+    get:
+      summary: Live event stream (Server-Sent Events)
+      description: text/event-stream of SessionEvent frames, replayable from a seq via Last-Event-ID.
+      tags: [sessions]
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses:
+        '200':
+          description: SSE stream
+          content:
+            text/event-stream:
+              schema: { $ref: '#/components/schemas/SessionEvent' }
+  /api/sessions/{id}/replay:
+    get:
+      summary: Full persisted event history for a session
+      tags: [sessions]
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/SessionEvent' } }
+  /api/sessions/{id}/pause:
+    post:
+      summary: Pause a running session
+      tags: [sessions]
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses: { '200': { description: OK } }
+  /api/sessions/{id}/resume:
+    post:
+      summary: Resume a paused session
+      tags: [sessions]
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses: { '200': { description: OK } }
+  /api/sessions/{id}/message:
+    post:
+      summary: Send a follow-up message into a running session
+      tags: [sessions]
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, properties: { text: { type: string } } }
+      responses: { '200': { description: OK } }
+  /api/sessions/{id}/approvals/{aid}:
+    post:
+      summary: Approve or reject a pending approval gate
+      tags: [sessions]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: aid, in: path, required: true, schema: { type: string } }
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, properties: { decision: { type: string, enum: [approve, reject] } } }
+      responses: { '200': { description: OK } }
+  /api/sessions/{id}/artifacts:
+    get:
+      summary: Artifacts produced by a session
+      tags: [sessions]
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Artifact' } } } } }
+  /api/sessions/{id}/share:
+    get:
+      summary: Get the share link for a session, if any
+      tags: [sessions]
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses: { '200': { description: OK } }
+    post:
+      summary: Create a public share link for a session
+      tags: [sessions]
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses: { '200': { description: OK } }
+  /api/share/{token}:
+    get:
+      summary: Public read-only session view by share token
+      security: []
+      tags: [share]
+      parameters: [{ name: token, in: path, required: true, schema: { type: string } }]
+      responses: { '200': { description: OK } }
+  /api/share/{token}/replay:
+    get:
+      summary: Public read-only event replay by share token
+      security: []
+      tags: [share]
+      parameters: [{ name: token, in: path, required: true, schema: { type: string } }]
+      responses: { '200': { description: OK } }
+  /api/connections:
+    get:
+      summary: List connectors and their connection status
+      tags: [connections]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Connection' } } } } }
+  /api/connections/{id}/connect:
+    post:
+      summary: Connect a connector
+      tags: [connections]
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses: { '200': { description: OK } }
+  /api/connections/{id}:
+    delete:
+      summary: Disconnect a connector
+      tags: [connections]
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses: { '200': { description: OK } }
+  /api/secrets:
+    get:
+      summary: List secret names (values never returned)
+      tags: [connections]
+      responses: { '200': { description: OK } }
+    post:
+      summary: Store a secret
+      tags: [connections]
+      responses: { '200': { description: OK } }
+  /api/schedules:
+    get:
+      summary: List scheduled jobs
+      tags: [schedules]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Schedule' } } } } }
+    post:
+      summary: Create a scheduled job
+      tags: [schedules]
+      responses: { '200': { description: Created } }
+  /api/schedules/{id}:
+    patch:
+      summary: Update a scheduled job
+      tags: [schedules]
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses: { '200': { description: OK } }
+    delete:
+      summary: Delete a scheduled job
+      tags: [schedules]
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses: { '200': { description: OK } }
+  /api/artifacts:
+    get:
+      summary: Cross-session artifact feed (Library page)
+      tags: [library]
+      parameters: [{ name: kind, in: query, schema: { type: string } }]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Artifact' } } } } }
+  /api/usage:
+    get:
+      summary: Usage KPIs (Usage page)
+      tags: [library]
+      responses: { '200': { description: OK } }
+  /api/audit:
+    get:
+      summary: Audit log entries
+      tags: [library]
+      responses: { '200': { description: OK } }
+  /api/settings:
+    get:
+      summary: Current user's settings
+      tags: [settings]
+      responses: { '200': { description: OK } }
+    patch:
+      summary: Update settings
+      tags: [settings]
+      responses: { '200': { description: OK } }
+  /api/members:
+    get:
+      summary: Org members
+      tags: [settings]
+      responses: { '200': { description: OK } }
+  /api/memory:
+    get:
+      summary: Repo / user / org memory entries
+      tags: [settings]
+      responses: { '200': { description: OK } }
+  /api/sandboxes/{id}/exec:
+    post:
+      summary: Execute a command in a session's sandbox (operator role only)
+      tags: [sandboxes]
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses: { '200': { description: OK }, '403': { description: Requires operator role } }

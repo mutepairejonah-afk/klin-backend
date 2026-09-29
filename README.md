@@ -104,3 +104,9 @@ real agent in `src/orchestrator/agent.ts`; with none, the canned stub runs. Prov
 429/error falls through to the next. `POST /sessions` accepts an optional `agent: { slug, name, systemPrompt }`
 (the specialist personas from agency-agents) which becomes the system prompt for that session.
 The agent cannot yet execute code or touch a repo, and its prompt says so.
+
+## API docs (Swagger)
+
+- Interactive docs served by the backend itself: `/api/docs` (public, no login needed).
+- Static copy on GitHub Pages, built from the same `docs/openapi.yaml`, so the two never drift apart.
+- To update: edit `docs/openapi.yaml` and redeploy; both surfaces pick it up automatically.

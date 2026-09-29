@@ -3,7 +3,7 @@
 // a rate limit (429), server error, or timeout falls through to the next one.
 export interface ChatMessage { role: 'system' | 'user' | 'assistant'; content: string }
 
-interface Provider { name: string; url: string; key: string; model: string; headers?: Record<string, string> }
+interface Provider { name: string; url: string; key: string; model: string; headers?: Record<string, string>; anthropic?: boolean }
 
 function providers(): Provider[] {
   const list: Provider[] = [];
@@ -24,10 +24,22 @@ function providers(): Provider[] {
       model: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
     });
   }
+  // Paid, opt-in. Only used if a key is set and — by default — only after the free
+  // providers above have been tried, so the free tiers stay the default cost path.
+  if (process.env.ANTHROPIC_API_KEY) {
+    list.push({
+      name: 'anthropic',
+      url: 'https://api.anthropic.com/v1/messages',
+      key: process.env.ANTHROPIC_API_KEY,
+      model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6',
+      anthropic: true,
+    });
+  }
   // Optional: PROVIDER_ORDER=google,openrouter
-  const order = (process.env.PROVIDER_ORDER || '').split(',').map((s) => s.trim()).filter(Boolean);
-  if (order.length) list.sort((a, b) => (order.indexOf(a.name) + 99) % 99 - (order.indexOf(b.name) + 99) % 99);
-  return list;
+  // Default order: free providers first, Claude last (it's the paid fallback).
+  const order = (process.env.PROVIDER_ORDER || 'openrouter,google,anthropic').split(',').map((s) => s.trim()).filter(Boolean);
+  const rank = (n: string) => { const i = order.indexOf(n); return i === -1 ? order.length : i; };
+  return list.sort((a, b) => rank(a.name) - rank(b.name));
 }
 
 export const llmConfigured = () => providers().length > 0;
@@ -38,20 +50,30 @@ export async function chat(messages: ChatMessage[], opts: { json?: boolean; maxT
     try {
       const ctrl = new AbortController();
       const timer = setTimeout(() => ctrl.abort(), 90_000);
+      const isAnthropic = !!p.anthropic;
+      const sys = messages.find((m) => m.role === 'system')?.content;
+      const rest = messages.filter((m) => m.role !== 'system');
+      const body = isAnthropic
+        ? { model: p.model, max_tokens: opts.maxTokens ?? 2000, ...(sys ? { system: sys } : {}), messages: rest }
+        : {
+            model: p.model,
+            messages,
+            max_tokens: opts.maxTokens ?? 2000,
+            ...(opts.json ? { response_format: { type: 'json_object' } } : {}),
+          };
       const r = await fetch(p.url, {
         method: 'POST',
         signal: ctrl.signal,
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${p.key}`, ...p.headers },
-        body: JSON.stringify({
-          model: p.model,
-          messages,
-          max_tokens: opts.maxTokens ?? 2000,
-          ...(opts.json ? { response_format: { type: 'json_object' } } : {}),
-        }),
+        headers: isAnthropic
+          ? { 'Content-Type': 'application/json', 'x-api-key': p.key, 'anthropic-version': '2023-06-01' }
+          : { 'Content-Type': 'application/json', Authorization: `Bearer ${p.key}`, ...p.headers },
+        body: JSON.stringify(body),
       }).finally(() => clearTimeout(timer));
       if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 200)}`);
       const data: any = await r.json();
-      const text: string | undefined = data?.choices?.[0]?.message?.content;
+      const text: string | undefined = isAnthropic
+        ? data?.content?.find((b: any) => b.type === 'text')?.text
+        : data?.choices?.[0]?.message?.content;
       if (!text) throw new Error('empty response');
       return { text, provider: p.name, model: p.model };
     } catch (e) {
