@@ -110,3 +110,20 @@ The agent cannot yet execute code or touch a repo, and its prompt says so.
 - Interactive docs served by the backend itself: `/api/docs` (public, no login needed).
 - Static copy on GitHub Pages, built from the same `docs/openapi.yaml`, so the two never drift apart.
 - To update: edit `docs/openapi.yaml` and redeploy; both surfaces pick it up automatically.
+
+## Auth (Clerk)
+
+Sign-in is handled by Clerk on the frontend (email, Google, GitHub, Vercel — enable each as a
+social connection in the Clerk Dashboard under SSO connections; email is on by default). The
+frontend sends Clerk's session token as `Authorization: Bearer <token>`; the backend verifies it
+with `CLERK_SECRET_KEY` (see `src/middleware/clerkAuth.ts`) and auto-creates an org for first-time
+sign-ins, same as the old Supabase-Auth trigger did.
+
+Because Clerk tokens aren't Supabase-signed JWTs, the backend now talks to Postgres with the
+service-role key for every request and enforces org scoping in the Express layer (`req.orgId`)
+rather than via RLS/`auth.uid()`. The RLS policies are left in the schema for a future migration
+to [Supabase's native Clerk integration](https://clerk.com/docs/integrations/databases/supabase),
+which would restore `auth.jwt()`-based RLS.
+
+The old `/api/auth/*` Supabase-cookie OAuth routes are still mounted but unused — safe to remove
+once Clerk is confirmed working end to end.

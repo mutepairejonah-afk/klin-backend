@@ -3,7 +3,8 @@ import express from 'express';
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
 
-import { attachAuth, requireAuth } from './middleware/auth.js';
+import { requireAuth } from './middleware/auth.js';
+import { attachClerkAuth } from './middleware/clerkAuth.js';
 import authRoutes from './routes/auth.js';
 import sessionsRoutes from './routes/sessions.js';
 import shareRoutes from './routes/share.js';
@@ -25,10 +26,12 @@ const app = express();
 app.use(cors({ origin: process.env.CORS_ORIGIN ?? 'http://localhost:5173', credentials: true }));
 app.use(express.json());
 app.use(cookieParser());
-app.use(attachAuth); // populates req.user/db/orgId/role when a session cookie is present
+app.use(attachClerkAuth); // populates req.user/db/orgId/role from a Clerk Bearer token
 
 // Auth routes are mounted before requireAuth — /auth/me, OAuth start/callback,
 // and signout must all work while logged out.
+// Legacy Supabase-cookie OAuth routes — unused now that Clerk handles sign-in,
+// kept mounted only so old links/callbacks 404 gracefully instead of erroring.
 app.use('/api/auth', authRoutes);
 app.use('/api/share', shareRoutes); // unauthenticated, token-scoped
 
