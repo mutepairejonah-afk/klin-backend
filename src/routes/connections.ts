@@ -1,8 +1,8 @@
 import { Router } from 'express';
-import crypto from 'node:crypto';
+import nodeCrypto from 'node:crypto';
 import { appendAudit } from '../lib/audit.js';
 import { CONNECTOR_CATALOG } from '../lib/connectorCatalog.js';
-import { encrypt, signState, verifyState } from '../lib/crypto.js';
+import { decrypt, encrypt, signState, verifyState } from '../lib/crypto.js';
 import { supabaseAdmin } from '../lib/supabase.js';
 
 const router = Router();
@@ -74,6 +74,41 @@ connectionsPublicRouter.get('/github/callback', async (req, res) => {
     console.error('github oauth callback failed', e);
     res.redirect(`${frontend}/connections?error=github_exception`);
   }
+});
+
+// GET /connections/github/repos — repos the connected GitHub account can see.
+router.get('/github/repos', async (req, res) => {
+  const { data: conn } = await req.db!.from('connections').select('encrypted_credentials, connected')
+    .eq('org_id', req.orgId).eq('provider', 'github').maybeSingle();
+  if (!conn?.connected || !conn.encrypted_credentials) return res.status(400).json({ error: 'GitHub is not connected' });
+
+  let token: string;
+  try { token = decrypt(conn.encrypted_credentials); } catch { return res.status(500).json({ error: 'Stored GitHub credentials are unreadable — reconnect GitHub' }); }
+
+  const r = await fetch('https://api.github.com/user/repos?per_page=100&sort=updated&affiliation=owner,collaborator,organization_member', {
+    headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'User-Agent': 'klin-app' },
+  });
+  if (!r.ok) return res.status(502).json({ error: `GitHub API error (${r.status})` });
+  const repos = (await r.json()) as any[];
+  await req.db!.from('connections').update({ last_used_at: new Date().toISOString() }).eq('org_id', req.orgId).eq('provider', 'github');
+  res.json(repos.map((x) => ({ fullName: x.full_name, private: x.private, defaultBranch: x.default_branch, updatedAt: x.updated_at })));
+});
+
+// GET /connections/github/repos/:owner/:repo/branches
+router.get('/github/repos/:owner/:repo/branches', async (req, res) => {
+  const { data: conn } = await req.db!.from('connections').select('encrypted_credentials, connected')
+    .eq('org_id', req.orgId).eq('provider', 'github').maybeSingle();
+  if (!conn?.connected || !conn.encrypted_credentials) return res.status(400).json({ error: 'GitHub is not connected' });
+
+  let token: string;
+  try { token = decrypt(conn.encrypted_credentials); } catch { return res.status(500).json({ error: 'Stored GitHub credentials are unreadable — reconnect GitHub' }); }
+
+  const r = await fetch(`https://api.github.com/repos/${encodeURIComponent(req.params.owner)}/${encodeURIComponent(req.params.repo)}/branches?per_page=100`, {
+    headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'User-Agent': 'klin-app' },
+  });
+  if (!r.ok) return res.status(502).json({ error: `GitHub API error (${r.status})` });
+  const branches = (await r.json()) as any[];
+  res.json(branches.map((b) => b.name));
 });
 
 // GET /connections — merges the static catalog (name/description/scopes)
@@ -149,7 +184,7 @@ secretsRouter.post('/', async (req, res) => {
 
   // Placeholder encryption — swap for envelope encryption (KMS/Vault) before
   // production use. Never store secret values in plaintext.
-  const encrypted = crypto.createHash('sha256').update(String(value)).digest('hex');
+  const encrypted = nodeCrypto.createHash('sha256').update(String(value)).digest('hex');
 
   const { data, error } = await req.db!
     .from('secrets')
