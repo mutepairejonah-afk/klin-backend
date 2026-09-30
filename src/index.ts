@@ -8,7 +8,7 @@ import { attachClerkAuth } from './middleware/clerkAuth.js';
 import authRoutes from './routes/auth.js';
 import sessionsRoutes from './routes/sessions.js';
 import shareRoutes from './routes/share.js';
-import connectionsRoutes, { secretsRouter } from './routes/connections.js';
+import connectionsRoutes, { secretsRouter, connectionsPublicRouter } from './routes/connections.js';
 import schedulesRoutes from './routes/schedules.js';
 import artifactsRoutes, { usageRouter, auditRouter } from './routes/library.js';
 import { settingsRouter, membersRouter, memoryRouter } from './routes/orgAdmin.js';
@@ -44,6 +44,10 @@ try {
 }
 
 // Everything below requires a valid session + org membership.
+// Public OAuth callbacks (GitHub redirects the browser here directly, no
+// Clerk auth header) must be mounted before requireAuth.
+app.use('/api/connections', connectionsPublicRouter);
+
 app.use('/api', requireAuth);
 app.use('/api/sessions', sessionsRoutes);
 app.use('/api/connections', connectionsRoutes);

@@ -127,3 +127,24 @@ which would restore `auth.jwt()`-based RLS.
 
 The old `/api/auth/*` Supabase-cookie OAuth routes are still mounted but unused — safe to remove
 once Clerk is confirmed working end to end.
+
+## Connectors
+
+`GET /connections` merges a static catalog with each org's connected state. Only GitHub has a
+real OAuth flow wired up so far (`/connections/github/start` + `/connections/github/callback`);
+every other catalog entry (Neon, Supabase, Vercel, Fly, Stripe, ...) is still a stub connect that
+just flips `connected=true` with no real token — each needs its own OAuth app registered the same
+way before it's "real". OAuth tokens are stored encrypted (AES-256-GCM, `CONNECTION_ENC_KEY`) in
+`connections.encrypted_credentials`, not in plaintext.
+
+To wire up GitHub: create a GitHub OAuth App (github.com/settings/developers), callback URL
+`<BACKEND_URL>/api/connections/github/callback`, then set `GITHUB_OAUTH_CLIENT_ID` /
+`GITHUB_OAUTH_CLIENT_SECRET` on the backend.
+
+## Research (no terminal needed)
+
+Plain chat and research questions no longer pretend to need a sandbox/terminal — see the agent's
+system prompt in `src/orchestrator/agent.ts`. A lightweight heuristic (`needsResearch` in
+`src/lib/websearch.ts`) triggers a real, keyless web search (DuckDuckGo HTML) when a goal looks
+like it needs current/factual info, and the results are fed into the model's answer. It's a free
+scrape, not a paid search API — swap it out if quality matters more than cost.
