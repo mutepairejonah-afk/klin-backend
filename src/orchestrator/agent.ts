@@ -1,6 +1,6 @@
 import { emitEvent } from '../lib/eventBus.js';
 import { supabaseAdmin } from '../lib/supabase.js';
-import { chat, type ChatMessage } from '../lib/llm.js';
+import { chat, type ChatMessage, type ModelOverride } from '../lib/llm.js';
 import { webSearch, needsResearch } from '../lib/websearch.js';
 
 export interface Persona { slug: string; name: string; systemPrompt: string }
@@ -13,7 +13,7 @@ function system(persona?: Persona) {
   return `${BASE}\n\nAdopt this specialist role for the whole task:\n\n${persona.systemPrompt.slice(0, 24_000)}`;
 }
 
-export async function runAgent(sessionId: string, goal: string, persona?: Persona) {
+export async function runAgent(sessionId: string, goal: string, persona?: Persona, modelOverride?: ModelOverride) {
   const setStatus = (status: string, extra: Record<string, unknown> = {}) =>
     supabaseAdmin.from('sessions').update({ status, ...extra }).eq('id', sessionId);
   const started = Date.now();
@@ -49,7 +49,7 @@ export async function runAgent(sessionId: string, goal: string, persona?: Person
     ];
     let steps = ['Answer the question'];
     try {
-      const plan = await chat(msgs, { json: true, maxTokens: 400 });
+      const plan = await chat(msgs, { json: true, maxTokens: 400 }, modelOverride);
       const parsed = JSON.parse(plan.text.replace(/```json|```/g, '').trim());
       if (Array.isArray(parsed.steps) && parsed.steps.length) steps = parsed.steps.slice(0, 5).map(String);
     } catch { /* fall back to the default single-step plan; the main call below reports real failures */ }
@@ -63,6 +63,7 @@ export async function runAgent(sessionId: string, goal: string, persona?: Person
         { role: 'user', content: `Goal: ${goal}${researchContext ? `\n\n${researchContext}` : ''}\n\nPlan:\n${steps.map((s, i) => `${i + 1}. ${s}`).join('\n')}\n\nCarry out the plan and give the full result.` },
       ],
       { maxTokens: 3000 },
+      modelOverride,
     );
     await emitEvent(sessionId, 'action.completed', { tool: 'model', result: `${answer.provider} · ${answer.model}` });
     await emitEvent(sessionId, 'thought', { role: 'executor', text: answer.text });

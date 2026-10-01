@@ -1,11 +1,20 @@
-// Free-tier friendly LLM client. Both providers speak the OpenAI chat-completions
-// dialect, so one fetch-based adapter covers them. Providers are tried in order;
-// a rate limit (429), server error, or timeout falls through to the next one.
+// Free-tier friendly LLM client. All four providers speak (or accept) the
+// OpenAI chat-completions dialect except Anthropic, which gets its own
+// request shape below. Providers are tried in order; a rate limit (429),
+// server error, or timeout falls through to the next one.
 export interface ChatMessage { role: 'system' | 'user' | 'assistant'; content: string }
 
-interface Provider { name: string; url: string; key: string; model: string; headers?: Record<string, string>; anthropic?: boolean }
+export type ProviderName = 'openrouter' | 'google' | 'anthropic' | 'ollama';
 
-function providers(): Provider[] {
+interface Provider { name: ProviderName; url: string; key: string; model: string; headers?: Record<string, string>; anthropic?: boolean }
+
+// A person's choice from Settings -> Model (stored in user_settings.model_routing).
+// `provider` is moved to the front of the try-order; `model` overrides that
+// provider's default model. Everything still falls back to the next provider
+// on failure — this only changes preference, not availability.
+export interface ModelOverride { provider?: ProviderName; model?: string }
+
+function basProviders(): Provider[] {
   const list: Provider[] = [];
   if (process.env.OPENROUTER_API_KEY) {
     list.push({
@@ -24,6 +33,16 @@ function providers(): Provider[] {
       model: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
     });
   }
+  // Ollama Cloud — hosted open models (gpt-oss, kimi, deepseek, ...) behind
+  // an OpenAI-compatible endpoint, keyed the same way as the providers above.
+  if (process.env.OLLAMA_API_KEY) {
+    list.push({
+      name: 'ollama',
+      url: 'https://ollama.com/v1/chat/completions',
+      key: process.env.OLLAMA_API_KEY,
+      model: process.env.OLLAMA_MODEL || 'gpt-oss:20b',
+    });
+  }
   // Paid, opt-in. Only used if a key is set and — by default — only after the free
   // providers above have been tried, so the free tiers stay the default cost path.
   if (process.env.ANTHROPIC_API_KEY) {
@@ -35,18 +54,30 @@ function providers(): Provider[] {
       anthropic: true,
     });
   }
-  // Optional: PROVIDER_ORDER=google,openrouter
-  // Default order: free providers first, Claude last (it's the paid fallback).
-  const order = (process.env.PROVIDER_ORDER || 'openrouter,google,anthropic').split(',').map((s) => s.trim()).filter(Boolean);
-  const rank = (n: string) => { const i = order.indexOf(n); return i === -1 ? order.length : i; };
-  return list.sort((a, b) => rank(a.name) - rank(b.name));
+  return list;
 }
 
-export const llmConfigured = () => providers().length > 0;
+function providers(override?: ModelOverride): Provider[] {
+  const list = basProviders();
+  // Optional: PROVIDER_ORDER=google,openrouter — server-wide default order.
+  const order = (process.env.PROVIDER_ORDER || 'openrouter,google,ollama,anthropic').split(',').map((s) => s.trim()).filter(Boolean);
+  const rank = (n: string) => { const i = order.indexOf(n); return i === -1 ? order.length : i; };
+  list.sort((a, b) => rank(a.name) - rank(b.name));
 
-export async function chat(messages: ChatMessage[], opts: { json?: boolean; maxTokens?: number } = {}) {
+  if (!override?.provider) return list;
+  const idx = list.findIndex((p) => p.name === override.provider);
+  if (idx === -1) return list; // chosen provider has no key set on the server — fall back silently
+  const [chosen] = list.splice(idx, 1);
+  if (override.model) chosen.model = override.model;
+  return [chosen, ...list];
+}
+
+export const llmConfigured = () => basProviders().length > 0;
+export const availableProviders = (): ProviderName[] => basProviders().map((p) => p.name);
+
+export async function chat(messages: ChatMessage[], opts: { json?: boolean; maxTokens?: number } = {}, override?: ModelOverride) {
   const errors: string[] = [];
-  for (const p of providers()) {
+  for (const p of providers(override)) {
     try {
       const ctrl = new AbortController();
       const timer = setTimeout(() => ctrl.abort(), 90_000);

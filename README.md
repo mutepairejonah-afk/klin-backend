@@ -148,3 +148,22 @@ system prompt in `src/orchestrator/agent.ts`. A lightweight heuristic (`needsRes
 `src/lib/websearch.ts`) triggers a real, keyless web search (DuckDuckGo HTML) when a goal looks
 like it needs current/factual info, and the results are fed into the model's answer. It's a free
 scrape, not a paid search API — swap it out if quality matters more than cost.
+
+## Model (per-person override)
+
+`Settings -> Model` lets a person pick a specific provider/model; it's stored in
+`user_settings.model_routing` as `{ provider, model }` and read by `POST /sessions`, which passes
+it to `runAgent` as a `ModelOverride`. The chosen provider is tried first; everything still falls
+back through the other configured providers on failure, so picking "Ollama" doesn't break a
+session if Ollama is briefly down. `GET /models` tells the frontend which providers actually have
+a key set on the server, so the picker doesn't offer a dead option.
+
+Fourth provider: **Ollama Cloud** (`OLLAMA_API_KEY`, ollama.com/settings/keys) — hosted open
+models (gpt-oss, Kimi, DeepSeek, ...) behind an OpenAI-compatible endpoint, same shape as
+OpenRouter/Gemini in `src/lib/llm.ts`. Has a free tier.
+
+## Deleting a session
+
+`DELETE /sessions/:id` removes the row (org-scoped) and closes any open SSE stream for it first,
+so a client watching a session that gets deleted mid-run sees the connection end cleanly instead
+of erroring.

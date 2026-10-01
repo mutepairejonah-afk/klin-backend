@@ -23,6 +23,15 @@ export function unsubscribe(sessionId: string, res: Response) {
   subscribers.get(sessionId)?.delete(res);
 }
 
+// Used when a session is deleted — ends any open SSE streams for it instead
+// of leaving clients hanging on a session whose row no longer exists.
+export function closeAll(sessionId: string) {
+  const set = subscribers.get(sessionId);
+  if (!set) return;
+  for (const res of set) { try { res.end(); } catch { /* already closed */ } }
+  subscribers.delete(sessionId);
+}
+
 function broadcast(sessionId: string, event: SessionEvent) {
   const set = subscribers.get(sessionId);
   if (!set) return;

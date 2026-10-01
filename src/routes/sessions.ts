@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import crypto from 'node:crypto';
 import { supabaseAdmin } from '../lib/supabase.js';
-import { emitEvent, subscribe, unsubscribe } from '../lib/eventBus.js';
+import { emitEvent, subscribe, unsubscribe, closeAll } from '../lib/eventBus.js';
 import { runStubOrchestrator } from '../orchestrator/stub.js';
 import { runAgent } from '../orchestrator/agent.js';
 import { llmConfigured } from '../lib/llm.js';
@@ -71,12 +71,29 @@ router.post('/', async (req, res) => {
 
   await appendAudit({ orgId: req.orgId!, actor: req.user!.email, action: 'session.created', sessionId: data.id, detail: input.goal, ip: req.ip });
 
+  // Settings -> Model: the person's preferred provider/model, if they set one.
+  const { data: settings } = await req.db!.from('user_settings').select('model_routing').eq('org_id', req.orgId).eq('user_id', req.user!.id).maybeSingle();
+  const modelOverride = settings?.model_routing?.provider ? { provider: settings.model_routing.provider, model: settings.model_routing.model } : undefined;
+
   // Kick off the orchestrator. Swap runStubOrchestrator for the real
   // agent loop (OpenHands or equivalent) once §5/§7 are wired up — the
   // session/event persistence and SSE fan-out around it don't change.
-  (llmConfigured() ? runAgent(data.id, input.goal, input.agent) : runStubOrchestrator(data.id, input.goal)).catch((err) => console.error('orchestrator error', err));
+  (llmConfigured() ? runAgent(data.id, input.goal, input.agent, modelOverride) : runStubOrchestrator(data.id, input.goal)).catch((err) => console.error('orchestrator error', err));
 
   res.status(201).json(toSessionDTO(data));
+});
+
+// DELETE /sessions/:id
+router.delete('/:id', async (req, res) => {
+  const { data: existing } = await req.db!.from('sessions').select('id').eq('id', req.params.id).eq('org_id', req.orgId).maybeSingle();
+  if (!existing) return res.status(404).json({ error: 'not found' });
+
+  closeAll(req.params.id); // drop any live SSE listeners before the row disappears
+  const { error } = await req.db!.from('sessions').delete().eq('id', req.params.id).eq('org_id', req.orgId);
+  if (error) return res.status(500).json({ error: error.message });
+
+  await appendAudit({ orgId: req.orgId!, actor: req.user!.email, action: 'session.deleted', sessionId: req.params.id, ip: req.ip });
+  res.status(204).end();
 });
 
 // GET /sessions/:id

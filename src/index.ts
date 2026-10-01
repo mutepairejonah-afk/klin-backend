@@ -61,6 +61,36 @@ app.use('/api/members', membersRouter);
 app.use('/api/memory', memoryRouter);
 app.use('/api/sandboxes', sandboxesRoutes);
 
+// GET /api/models — which AI providers are actually configured on this server
+// (so Settings can't offer to pick a provider with no key behind it), plus a
+// short curated list of known-good models per provider.
+app.get('/api/models', async (_req, res) => {
+  const { availableProviders } = await import('./lib/llm.js');
+  const CATALOG: Record<string, { label: string; models: { id: string; label: string }[] }> = {
+    openrouter: { label: 'OpenRouter', models: [
+      { id: 'openrouter/free', label: 'Free router (auto-picks a free model)' },
+      { id: 'meta-llama/llama-3.3-70b-instruct:free', label: 'Llama 3.3 70B (free)' },
+      { id: 'qwen/qwen-2.5-coder-32b-instruct:free', label: 'Qwen 2.5 Coder 32B (free)' },
+    ] },
+    google: { label: 'Google Gemini', models: [
+      { id: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash' },
+      { id: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro' },
+    ] },
+    ollama: { label: 'Ollama Cloud', models: [
+      { id: 'gpt-oss:20b', label: 'GPT-OSS 20B' },
+      { id: 'gpt-oss:120b', label: 'GPT-OSS 120B' },
+      { id: 'kimi-k2.6', label: 'Kimi K2.6' },
+      { id: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash' },
+    ] },
+    anthropic: { label: 'Anthropic Claude (paid)', models: [
+      { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
+      { id: 'claude-opus-4-6', label: 'Claude Opus 4.6' },
+    ] },
+  };
+  const configured = new Set(availableProviders());
+  res.json(Object.entries(CATALOG).map(([id, v]) => ({ id, ...v, configured: configured.has(id as any) })));
+});
+
 app.get('/healthz', (_req, res) => res.json({ ok: true }));
 
 app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
