@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { requireOperator } from '../middleware/auth.js';
 
 const router = Router();
 
@@ -16,7 +17,7 @@ router.get('/', async (req, res) => {
   res.json((data ?? []).map(toDTO));
 });
 
-router.post('/', async (req, res) => {
+router.post('/', requireOperator, async (req, res) => {
   const { name, jobId, repo, cadenceLabel, cadenceCron, enabled } = req.body ?? {};
   if (!name || !jobId || !cadenceLabel || !cadenceCron) {
     return res.status(400).json({ error: 'name, jobId, cadenceLabel, cadenceCron required' });
@@ -30,7 +31,7 @@ router.post('/', async (req, res) => {
   res.status(201).json(toDTO(data));
 });
 
-router.patch('/:id', async (req, res) => {
+router.patch('/:id', requireOperator, async (req, res) => {
   const patch: Record<string, unknown> = {};
   const b = req.body ?? {};
   if (b.name !== undefined) patch.name = b.name;
@@ -45,7 +46,7 @@ router.patch('/:id', async (req, res) => {
   res.json(toDTO(data));
 });
 
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', requireOperator, async (req, res) => {
   const { error } = await req.db!.from('schedules').delete().eq('id', req.params.id).eq('org_id', req.orgId);
   if (error) return res.status(500).json({ error: error.message });
   res.status(204).end();

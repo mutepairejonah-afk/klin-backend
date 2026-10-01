@@ -1,13 +1,12 @@
 import crypto from 'node:crypto';
 
-// Reversible encryption for OAuth tokens we need to use later (calling GitHub's
-// API on the user's behalf), unlike the one-way hash used for user-supplied
-// secrets in routes/connections.ts. Key comes from CONNECTION_ENC_KEY — set a
-// long random value in production; falls back to a fixed dev key so local/dev
-// boots without extra setup (never rely on that fallback in production).
+// Reversible authenticated encryption for OAuth tokens and user secrets. The
+// key must be explicitly configured in production; the development fallback is
+// intentionally unavailable when NODE_ENV=production.
 function key(): Buffer {
-  const secret = process.env.CONNECTION_ENC_KEY || 'dev-insecure-key-change-me-in-render';
-  return crypto.createHash('sha256').update(secret).digest();
+  const secret = process.env.CONNECTION_ENC_KEY;
+  if (!secret && process.env.NODE_ENV === 'production') throw new Error('CONNECTION_ENC_KEY is required in production');
+  return crypto.createHash('sha256').update(secret ?? 'dev-insecure-key-change-me').digest();
 }
 
 export function encrypt(plain: string): string {

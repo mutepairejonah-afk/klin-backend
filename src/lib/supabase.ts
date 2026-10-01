@@ -4,8 +4,8 @@ const SUPABASE_URL = process.env.SUPABASE_URL!;
 const ANON_KEY = process.env.SUPABASE_ANON_KEY!;
 const SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
 
-if (!SUPABASE_URL || !ANON_KEY) {
-  throw new Error('SUPABASE_URL / SUPABASE_ANON_KEY missing — copy .env.example to .env and fill it in.');
+if (!SUPABASE_URL || !ANON_KEY || !SERVICE_ROLE_KEY) {
+  throw new Error('SUPABASE_URL, SUPABASE_ANON_KEY, and SUPABASE_SERVICE_ROLE_KEY are required.');
 }
 
 // Service-role client: bypasses RLS. Used only for server-owned writes

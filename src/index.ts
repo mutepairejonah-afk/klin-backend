@@ -64,7 +64,7 @@ app.use('/api/sandboxes', sandboxesRoutes);
 // GET /api/models — which AI providers are actually configured on this server
 // (so Settings can't offer to pick a provider with no key behind it), plus a
 // short curated list of known-good models per provider.
-app.get('/api/models', async (_req, res) => {
+app.get('/api/models', requireAuth, async (_req, res) => {
   const { availableProviders } = await import('./lib/llm.js');
   const CATALOG: Record<string, { label: string; models: { id: string; label: string }[] }> = {
     openrouter: { label: 'OpenRouter', models: [

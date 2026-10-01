@@ -10,12 +10,14 @@ Postgres database.
   library/usage/audit, settings/members/memory, and GitHub/Google OAuth.
 - SSE event stream (`GET /sessions/:id/events`) + replay, backed by an
   append-only `events` table (persist-before-broadcast, per §4).
-- A **stub orchestrator** (`src/orchestrator/stub.ts`) that emits a canned
-  event script when a session is created — swap it for the real agent loop
-  (OpenHands or equivalent, per §5) once that's wired up. Nothing else needs
-  to change; it talks to the rest of the system only through `emitEvent()`.
-- Org-scoped RLS on every table in Postgres — the API mostly just forwards
-  the caller's JWT to Supabase and lets Postgres enforce access.
+- A guarded orchestration boundary. If no model/runtime is configured, a
+  session fails explicitly; it never emits fake edits, test results, commits,
+  or pull requests. The real tool-running agent still needs to be connected
+  before coding sessions are advertised as executable.
+- Clerk bearer tokens are verified at the API boundary; because Clerk tokens
+  are not Supabase JWTs, request handlers use the service-role client and must
+  explicitly scope every query by `req.orgId`. This is also documented as a
+  migration target for native Clerk/Supabase RLS.
 
 ## Not included
 
@@ -56,10 +58,11 @@ in the frontend's `.env`.
 
 ## Database
 
-The schema (`supabase/migrations/` in this folder, mirrored into the Supabase
-project as migration `initial_schema`) implements every table in
-`docs/BACKEND.md` §10, plus RLS policies and an on-signup trigger that
-creates a personal org + owner membership for each new user.
+The deployment must apply the core schema plus the integrity migration in
+`supabase/migrations/0002_event_integrity.sql`. The latter adds the unique
+`(session_id, seq)` event invariant and approval lookup index. Keep the
+database schema versioned alongside this service; do not rely on an invisible
+dashboard-only migration.
 
 To apply it to a different Supabase project, run `supabase/migrations/` followed
 by `auto_provision_org_on_signup` (see the file's own comments) through the
@@ -77,17 +80,18 @@ SQL editor or the Supabase CLI.
 
 ## Safety gates (§8)
 
-The stub orchestrator doesn't hit any of the gated operations (force push,
-destructive SQL, prod deploys, secrets, spend, package installs, untrusted
-code, bulk third-party writes), so it never emits `approval.requested`. Once
-the real agent loop is wired in, it should call `emitEvent(sessionId,
-'approval.requested', {...})` and the session should not proceed past that
-tool call until `POST /sessions/:id/approvals/:aid` resolves it — the route
-for resolving approvals is already implemented.
+The current chat/research agent has no coding tools, so it cannot yet reach
+the gated operations. The future tool runner must emit
+`approval.requested` and stop before the tool call until
+`POST /sessions/:id/approvals/:aid` resolves it. The route is now role-gated,
+org-scoped, and only updates a still-pending approval.
 
 ## Realtime
 
-The frontend can subscribe straight to Postgres changes with `supabase-js` (RLS applies), no custom WebSocket code:
+The frontend uses the API's authenticated SSE stream. Do not expose the
+Supabase service-role client or put Clerk tokens in query strings. A
+multi-instance deployment should move the in-memory fan-out in
+`src/lib/eventBus.ts` to Redis or Postgres LISTEN/NOTIFY.
 
 ```ts
 supabase.channel('session-' + id)
@@ -100,7 +104,8 @@ Realtime is enabled for `sessions`, `events`, `approvals`, `artifacts`, `sandbox
 ## AI providers (free tiers)
 
 Set `OPENROUTER_API_KEY` and/or `GEMINI_API_KEY` (see `.env.example`). With at least one set, sessions run the
-real agent in `src/orchestrator/agent.ts`; with none, the canned stub runs. Providers are tried in order and a
+current chat/research agent in `src/orchestrator/agent.ts`; with none, sessions fail explicitly rather than
+pretending to execute. Providers are tried in order and a
 429/error falls through to the next. `POST /sessions` accepts an optional `agent: { slug, name, systemPrompt }`
 (the specialist personas from agency-agents) which becomes the system prompt for that session.
 The agent cannot yet execute code or touch a repo, and its prompt says so.
@@ -131,10 +136,10 @@ once Clerk is confirmed working end to end.
 ## Connectors
 
 `GET /connections` merges a static catalog with each org's connected state. Only GitHub has a
-real OAuth flow wired up so far (`/connections/github/start` + `/connections/github/callback`);
-every other catalog entry (Neon, Supabase, Vercel, Fly, Stripe, ...) is still a stub connect that
-just flips `connected=true` with no real token — each needs its own OAuth app registered the same
-way before it's "real". OAuth tokens are stored encrypted (AES-256-GCM, `CONNECTION_ENC_KEY`) in
+real OAuth flow wired up so far (`/connections/github/start` + `/connections/github/callback`).
+Unsupported providers return `501` and remain disconnected; they no longer create fake
+credentials. OAuth tokens and user secrets are stored encrypted (AES-256-GCM,
+`CONNECTION_ENC_KEY`) in
 `connections.encrypted_credentials`, not in plaintext.
 
 To wire up GitHub: create a GitHub OAuth App (github.com/settings/developers), callback URL

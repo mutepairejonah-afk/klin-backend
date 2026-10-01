@@ -3,10 +3,12 @@ import { z } from 'zod';
 import crypto from 'node:crypto';
 import { supabaseAdmin } from '../lib/supabase.js';
 import { emitEvent, subscribe, unsubscribe, closeAll } from '../lib/eventBus.js';
-import { runStubOrchestrator } from '../orchestrator/stub.js';
+import { runUnavailableOrchestrator } from '../orchestrator/unavailable.js';
 import { runAgent } from '../orchestrator/agent.js';
 import { llmConfigured } from '../lib/llm.js';
 import { appendAudit } from '../lib/audit.js';
+import { cancelSession, forgetSessionControl, pauseSession, resumeSession, steerSession } from '../lib/sessionControl.js';
+import { requireOperator } from '../middleware/auth.js';
 
 const router = Router();
 
@@ -75,10 +77,14 @@ router.post('/', async (req, res) => {
   const { data: settings } = await req.db!.from('user_settings').select('model_routing').eq('org_id', req.orgId).eq('user_id', req.user!.id).maybeSingle();
   const modelOverride = settings?.model_routing?.provider ? { provider: settings.model_routing.provider, model: settings.model_routing.model } : undefined;
 
-  // Kick off the orchestrator. Swap runStubOrchestrator for the real
-  // agent loop (OpenHands or equivalent) once §5/§7 are wired up — the
-  // session/event persistence and SSE fan-out around it don't change.
-  (llmConfigured() ? runAgent(data.id, input.goal, input.agent, modelOverride) : runStubOrchestrator(data.id, input.goal)).catch((err) => console.error('orchestrator error', err));
+  // Never simulate a successful coding run. Until a real execution runtime is
+  // configured, fail explicitly rather than emitting fake edits, tests, or PRs.
+  const codingRuntimeReady = process.env.SANDBOX_RUNTIME_URL && process.env.ORCHESTRATOR_MODE === 'coding';
+  const executionRequested = Boolean(input.repo || input.jobId);
+  (llmConfigured() && (!executionRequested || codingRuntimeReady)
+    ? runAgent(data.id, input.goal, input.agent, modelOverride)
+    : runUnavailableOrchestrator(data.id, input.goal))
+    .catch((err) => console.error('orchestrator error', err));
 
   res.status(201).json(toSessionDTO(data));
 });
@@ -88,11 +94,13 @@ router.delete('/:id', async (req, res) => {
   const { data: existing } = await req.db!.from('sessions').select('id').eq('id', req.params.id).eq('org_id', req.orgId).maybeSingle();
   if (!existing) return res.status(404).json({ error: 'not found' });
 
+  cancelSession(req.params.id);
   closeAll(req.params.id); // drop any live SSE listeners before the row disappears
   const { error } = await req.db!.from('sessions').delete().eq('id', req.params.id).eq('org_id', req.orgId);
   if (error) return res.status(500).json({ error: error.message });
 
   await appendAudit({ orgId: req.orgId!, actor: req.user!.email, action: 'session.deleted', sessionId: req.params.id, ip: req.ip });
+  forgetSessionControl(req.params.id);
   res.status(204).end();
 });
 
@@ -137,6 +145,11 @@ router.get('/:id/replay', async (req, res) => {
 
 // POST /sessions/:id/pause | /resume
 router.post('/:id/pause', async (req, res) => {
+  const { data: session, error: lookupError } = await req.db!.from('sessions').select('id,status').eq('id', req.params.id).eq('org_id', req.orgId).maybeSingle();
+  if (lookupError) return res.status(500).json({ error: lookupError.message });
+  if (!session) return res.status(404).json({ error: 'not found' });
+  if (session.status === 'done' || session.status === 'failed') return res.status(409).json({ error: 'session is already finished' });
+  pauseSession(req.params.id);
   const { error } = await req.db!.from('sessions').update({ status: 'paused' }).eq('id', req.params.id).eq('org_id', req.orgId);
   if (error) return res.status(500).json({ error: error.message });
   await emitEvent(req.params.id, 'thought', { role: 'executor', text: 'Session paused by user.' });
@@ -144,6 +157,11 @@ router.post('/:id/pause', async (req, res) => {
 });
 
 router.post('/:id/resume', async (req, res) => {
+  const { data: session, error: lookupError } = await req.db!.from('sessions').select('id,status').eq('id', req.params.id).eq('org_id', req.orgId).maybeSingle();
+  if (lookupError) return res.status(500).json({ error: lookupError.message });
+  if (!session) return res.status(404).json({ error: 'not found' });
+  if (session.status !== 'paused') return res.status(409).json({ error: 'session is not paused' });
+  resumeSession(req.params.id);
   const { error } = await req.db!.from('sessions').update({ status: 'executing' }).eq('id', req.params.id).eq('org_id', req.orgId);
   if (error) return res.status(500).json({ error: error.message });
   await emitEvent(req.params.id, 'thought', { role: 'executor', text: 'Session resumed by user.' });
@@ -154,21 +172,31 @@ router.post('/:id/resume', async (req, res) => {
 router.post('/:id/message', async (req, res) => {
   const message = String(req.body?.message ?? '');
   if (!message) return res.status(400).json({ error: 'message required' });
+  const { data: session, error: lookupError } = await req.db!.from('sessions').select('id,status').eq('id', req.params.id).eq('org_id', req.orgId).maybeSingle();
+  if (lookupError) return res.status(500).json({ error: lookupError.message });
+  if (!session) return res.status(404).json({ error: 'not found' });
+  if (session.status === 'done' || session.status === 'failed') return res.status(409).json({ error: 'session is already finished' });
+  steerSession(req.params.id, message);
   await emitEvent(req.params.id, 'thought', { role: 'executor', text: `User steered: "${message}"` });
   res.status(204).end();
 });
 
 // POST /sessions/:id/approvals/:aid
-router.post('/:id/approvals/:aid', async (req, res) => {
+router.post('/:id/approvals/:aid', requireOperator, async (req, res) => {
   const decision = req.body?.decision as 'approved' | 'rejected';
   if (decision !== 'approved' && decision !== 'rejected') return res.status(400).json({ error: 'invalid decision' });
 
-  const { error } = await req.db!
+  const { data: approval, error } = await req.db!
     .from('approvals')
     .update({ status: decision, resolved_at: new Date().toISOString(), resolved_by: req.user!.id })
     .eq('id', req.params.aid)
-    .eq('session_id', req.params.id);
+    .eq('session_id', req.params.id)
+    .eq('org_id', req.orgId)
+    .eq('status', 'pending')
+    .select('id')
+    .maybeSingle();
   if (error) return res.status(500).json({ error: error.message });
+  if (!approval) return res.status(404).json({ error: 'pending approval not found' });
 
   await emitEvent(req.params.id, 'approval.resolved', { id: req.params.aid, decision });
   await appendAudit({

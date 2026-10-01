@@ -1,15 +1,14 @@
 import { Router } from 'express';
-import nodeCrypto from 'node:crypto';
 import { appendAudit } from '../lib/audit.js';
 import { CONNECTOR_CATALOG } from '../lib/connectorCatalog.js';
 import { decrypt, encrypt, signState, verifyState } from '../lib/crypto.js';
 import { supabaseAdmin } from '../lib/supabase.js';
+import { requireOperator } from '../middleware/auth.js';
 
 const router = Router();
 
-// Providers with a real OAuth flow wired up (below). Everything else in the
-// catalog is still a stub connect (marks connected=true, no real token) until
-// it gets the same treatment — each provider needs its own OAuth app.
+// Providers with a real OAuth flow wired up below. Unsupported providers stay
+// visibly disconnected until their credentials flow is implemented.
 const REAL_OAUTH = new Set(['github']);
 
 function backendUrl(req: import('express').Request) {
@@ -132,31 +131,15 @@ router.get('/', async (req, res) => {
 
 // POST /connections/:id/connect — stub path for providers without a real
 // OAuth app registered yet. Real ones (github) should use /github/start instead.
-router.post('/:id/connect', async (req, res) => {
+router.post('/:id/connect', requireOperator, async (req, res) => {
   const catalogEntry = CONNECTOR_CATALOG.find((c) => c.id === req.params.id);
   if (!catalogEntry) return res.status(404).json({ error: 'unknown connector' });
   if (REAL_OAUTH.has(req.params.id)) return res.status(400).json({ error: 'use the OAuth flow for this connector' });
-
-  const { data, error } = await req.db!
-    .from('connections')
-    .upsert({
-      org_id: req.orgId, provider: req.params.id, connected: true,
-      scopes: catalogEntry.scopes, connected_at: new Date().toISOString(),
-      encrypted_credentials: req.body?.authCode ? 'stub-encrypted' : null,
-    }, { onConflict: 'org_id,provider' })
-    .select('*')
-    .single();
-  if (error) return res.status(500).json({ error: error.message });
-
-  await appendAudit({ orgId: req.orgId!, actor: req.user!.email, action: 'connection.connected', detail: req.params.id, ip: req.ip });
-  res.json({
-    id: catalogEntry.id, name: catalogEntry.name, description: catalogEntry.description,
-    scopes: catalogEntry.scopes, connected: true, meta: data.meta ?? undefined, lastUsedAt: data.last_used_at ?? undefined,
-  });
+  return res.status(501).json({ error: `${catalogEntry.name} connection is not implemented yet` });
 });
 
 // DELETE /connections/:id
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', requireOperator, async (req, res) => {
   const { error } = await req.db!.from('connections').delete().eq('org_id', req.orgId).eq('provider', req.params.id);
   if (error) return res.status(500).json({ error: error.message });
   await appendAudit({ orgId: req.orgId!, actor: req.user!.email, action: 'connection.disconnected', detail: req.params.id, ip: req.ip });
@@ -178,13 +161,14 @@ secretsRouter.get('/', async (req, res) => {
 
 // POST /secrets — { handle, value, scope }. Value is encrypted at rest and
 // never included in any response; the sandbox resolves it at command time.
-secretsRouter.post('/', async (req, res) => {
+secretsRouter.post('/', requireOperator, async (req, res) => {
   const { handle, value, scope } = req.body ?? {};
   if (!handle || !value || !scope) return res.status(400).json({ error: 'handle, value, scope required' });
 
-  // Placeholder encryption — swap for envelope encryption (KMS/Vault) before
-  // production use. Never store secret values in plaintext.
-  const encrypted = nodeCrypto.createHash('sha256').update(String(value)).digest('hex');
+  // Store reversible authenticated encryption: the sandbox must be able to
+  // resolve the handle at execution time, while the value never goes to the
+  // frontend or event log.
+  const encrypted = encrypt(String(value));
 
   const { data, error } = await req.db!
     .from('secrets')
@@ -197,7 +181,7 @@ secretsRouter.post('/', async (req, res) => {
   res.status(201).json(toSecretDTO(data));
 });
 
-secretsRouter.delete('/:id', async (req, res) => {
+secretsRouter.delete('/:id', requireOperator, async (req, res) => {
   const { error } = await req.db!.from('secrets').delete().eq('id', req.params.id).eq('org_id', req.orgId);
   if (error) return res.status(500).json({ error: error.message });
   await appendAudit({ orgId: req.orgId!, actor: req.user!.email, action: 'secret.deleted', detail: req.params.id, ip: req.ip });
