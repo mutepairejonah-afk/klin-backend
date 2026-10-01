@@ -19,10 +19,6 @@ declare global {
 function bearerToken(req: Request): string | undefined {
   const h = req.headers.authorization;
   if (h?.startsWith('Bearer ')) return h.slice(7);
-  // EventSource can't set headers, so the SSE route (/sessions/:id/events)
-  // passes the token as a query param instead. Harmless elsewhere since
-  // nothing else sets it.
-  if (typeof req.query.token === 'string') return req.query.token;
   return undefined;
 }
 

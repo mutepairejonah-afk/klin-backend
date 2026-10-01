@@ -3,10 +3,9 @@ info:
   title: klin API (kiln-api)
   version: "1.0.0"
   description: |
-    REST + SSE backend for klin. Auth is a Supabase session cookie set by the
-    OAuth callback below — there is no separate bearer token for the browser client.
-    All routes except `/api/auth/*`, `/api/share/*` and `/healthz` require a
-    signed-in session with org membership (enforced by RLS at the database level).
+    REST + SSE backend for klin. Auth is a Clerk bearer token. All routes except
+    `/api/auth/*`, `/api/share/*`, `/api/docs` and `/healthz` require a signed-in
+    session with org membership; handlers explicitly scope service-role queries.
 servers:
   - url: https://kiln-api-2lhz.onrender.com
     description: Production (Render)
@@ -23,10 +22,9 @@ tags:
   - name: share
 components:
   securitySchemes:
-    sessionCookie:
-      type: apiKey
-      in: cookie
-      name: kiln_session
+    clerkBearer:
+      type: http
+      scheme: bearer
   schemas:
     Session:
       type: object
@@ -99,7 +97,7 @@ components:
       properties:
         error: { type: string }
 security:
-  - sessionCookie: []
+  - clerkBearer: []
 paths:
   /healthz:
     get:
@@ -151,7 +149,7 @@ paths:
               schema: { type: array, items: { $ref: '#/components/schemas/Session' } }
     post:
       summary: Create a session and start the agent
-      description: Runs the real agent (OpenRouter → Gemini → Claude, first configured/available) if any AI provider key is set on the server, otherwise a canned demo.
+      description: Runs the current chat/research agent when configured. Repository coding requests fail explicitly until a real sandbox/orchestrator runtime is configured; no simulated edits, tests, or pull requests are emitted.
       tags: [sessions]
       requestBody:
         required: true
