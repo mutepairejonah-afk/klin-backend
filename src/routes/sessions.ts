@@ -9,6 +9,7 @@ import { llmConfigured } from '../lib/llm.js';
 import { appendAudit } from '../lib/audit.js';
 import { cancelSession, forgetSessionControl, pauseSession, resumeSession, steerSession } from '../lib/sessionControl.js';
 import { requireOperator } from '../middleware/auth.js';
+import { executionWorker } from '../worker/executionWorker.js';
 
 const router = Router();
 
@@ -79,11 +80,14 @@ router.post('/', async (req, res) => {
 
   // Never simulate a successful coding run. Until a real execution runtime is
   // configured, fail explicitly rather than emitting fake edits, tests, or PRs.
-  const codingRuntimeReady = process.env.SANDBOX_RUNTIME_URL && process.env.ORCHESTRATOR_MODE === 'coding';
+  const codingRuntimeReady = process.env.KILN_EXECUTION_ENABLED === 'true' && process.env.ORCHESTRATOR_MODE === 'coding';
   const executionRequested = Boolean(input.repo || input.jobId);
-  (llmConfigured() && (!executionRequested || codingRuntimeReady)
-    ? runAgent(data.id, input.goal, input.agent, modelOverride)
-    : runUnavailableOrchestrator(data.id, input.goal))
+  const run = executionRequested && codingRuntimeReady
+    ? executionWorker.enqueue({ sessionId: data.id, orgId: req.orgId!, actor: req.user!.email, repo: input.repo, branch: input.branch })
+    : llmConfigured() && !executionRequested
+      ? runAgent(data.id, input.goal, input.agent, modelOverride)
+      : runUnavailableOrchestrator(data.id, input.goal);
+  Promise.resolve(run)
     .catch((err) => console.error('orchestrator error', err));
 
   res.status(201).json(toSessionDTO(data));

@@ -19,11 +19,18 @@ Postgres database.
   explicitly scope every query by `req.orgId`. This is also documented as a
   migration target for native Clerk/Supabase RLS.
 
-## Not included
+## Execution plane
 
-The agent loop, the sandbox runtime (OpenSandbox/Docker), and background
-workers (BullMQ) — see `docs/BACKEND.md` §2 for those. This is the `api`
-service only.
+The backend now includes a Docker-isolated execution baseline. Coding sessions
+are handled by a bounded `ExecutionWorker`, which provisions one non-root
+container and workspace volume per session and exposes filesystem, shell, Git,
+and test tools through `src/tools/sandboxTools.ts`. The worker is disabled by
+default; enable it only on a host with Docker and a pinned image using the
+`KILN_EXECUTION_*` settings in `.env.example`.
+
+See [`docs/EXECUTION.md`](docs/EXECUTION.md) for the isolation model, threat
+boundaries, lifecycle, and OpenSandbox replacement seam. The current queue is
+in-process and should move to BullMQ/Redis when the API is horizontally scaled.
 
 ## Setup
 

@@ -149,7 +149,7 @@ paths:
               schema: { type: array, items: { $ref: '#/components/schemas/Session' } }
     post:
       summary: Create a session and start the agent
-      description: Runs the current chat/research agent when configured. Repository coding requests fail explicitly until a real sandbox/orchestrator runtime is configured; no simulated edits, tests, or pull requests are emitted.
+      description: Runs the current chat/research agent for plain questions. Repository coding requests are queued into the Docker execution worker only when KILN_EXECUTION_ENABLED=true; otherwise they fail explicitly and never emit simulated edits, tests, or pull requests.
       tags: [sessions]
       requestBody:
         required: true
@@ -345,7 +345,19 @@ paths:
       responses: { '200': { description: OK } }
   /api/sandboxes/{id}/exec:
     post:
-      summary: Execute a command in a session's sandbox (operator role only)
+      summary: Execute a bounded command in a Docker-isolated session sandbox (operator role only, development diagnostics)
+      description: Disabled unless ALLOW_DEV_SANDBOX_EXEC=true. Commands run as uid 1000 inside /workspace with runtime CPU, memory, PID, timeout, and output limits.
       tags: [sandboxes]
       parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
-      responses: { '200': { description: OK }, '403': { description: Requires operator role } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [command]
+              properties:
+                command: { type: string }
+                cwd: { type: string, default: /workspace }
+                timeoutMs: { type: integer, minimum: 1, maximum: 900000, default: 120000 }
+      responses: { '200': { description: OK }, '403': { description: Requires operator role or endpoint disabled }, '422': { description: Command failed } }
