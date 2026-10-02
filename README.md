@@ -87,10 +87,9 @@ SQL editor or the Supabase CLI.
 
 ## Safety gates (§8)
 
-The current chat/research agent has no coding tools, so it cannot yet reach
-the gated operations. The future tool runner must emit
-`approval.requested` and stop before the tool call until
-`POST /sessions/:id/approvals/:aid` resolves it. The route is now role-gated,
+The coding executor now calls the isolated filesystem, shell, Git, and test
+tools one action at a time. Commits emit `approval.requested` and block until
+`POST /sessions/:id/approvals/:aid` resolves it. The route is role-gated,
 org-scoped, and only updates a still-pending approval.
 
 ## Realtime
@@ -115,7 +114,8 @@ current chat/research agent in `src/orchestrator/agent.ts`; with none, sessions 
 pretending to execute. Providers are tried in order and a
 429/error falls through to the next. `POST /sessions` accepts an optional `agent: { slug, name, systemPrompt }`
 (the specialist personas from agency-agents) which becomes the system prompt for that session.
-The agent cannot yet execute code or touch a repo, and its prompt says so.
+Coding sessions use the JSON executor loop when the Docker execution plane is
+enabled; plain chat/research sessions continue to use the chat agent.
 
 ## API docs (Swagger)
 

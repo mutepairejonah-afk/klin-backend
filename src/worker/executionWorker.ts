@@ -4,14 +4,18 @@ import { checkpoint } from '../lib/sessionControl.js';
 import { emitEvent } from '../lib/eventBus.js';
 import { DockerSandboxRuntime } from '../sandbox/docker.js';
 import { SandboxHandle, SandboxRuntime } from '../sandbox/types.js';
-import { eventSink, gitClone, gitBranch, gitStatus, runTests } from '../tools/sandboxTools.js';
+import { eventSink, gitClone, gitBranch, gitStatus } from '../tools/sandboxTools.js';
+import { executeCodingTask } from '../orchestrator/executor.js';
+import type { ModelOverride } from '../lib/llm.js';
 
 export interface CodingJob {
   sessionId: string;
   orgId: string;
   actor: string;
+  goal: string;
   repo?: string;
   branch?: string;
+  modelOverride?: ModelOverride;
 }
 
 interface QueuedJob { job: CodingJob; resolve: () => void; reject: (error: unknown) => void }
@@ -70,10 +74,8 @@ export class ExecutionWorker {
         if (job.branch) await gitBranch(context, job.branch);
       }
       await gitStatus(context);
-      await runTests(context).catch(async (error) => {
-        await events.emit('thought', { role: 'executor', text: `Tests were not run: ${error instanceof Error ? error.message : String(error)}` });
-      });
-      await events.emit('session.done', { summary: 'Sandbox initialized; tool execution is ready for the agent loop.' });
+      const result = await executeCodingTask(job.sessionId, job.orgId, job.goal, sandbox, this.runtime, job.modelOverride);
+      await events.emit('session.done', { summary: result.summary.slice(0, 280) });
       await supabaseAdmin.from('sessions').update({ status: 'done', ended_at: new Date().toISOString() }).eq('id', job.sessionId).eq('org_id', job.orgId);
       await supabaseAdmin.from('sandboxes').update({ status: 'idle', updated_at: new Date().toISOString() }).eq('id', sandboxRecordId);
       await appendAudit({ orgId: job.orgId, actor: job.actor, action: 'sandbox.initialized', sessionId: job.sessionId, detail: sandbox.machineId });

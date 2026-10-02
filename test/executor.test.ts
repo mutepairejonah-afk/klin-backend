@@ -1,0 +1,42 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { executeCodingTask } from '../src/orchestrator/executor.js';
+import type { ChatMessage } from '../src/lib/llm.js';
+import type { ExecRequest, ExecResult, SandboxHandle, SandboxRuntime, ToolEventSink } from '../src/sandbox/types.js';
+
+const sandbox: SandboxHandle = { id: 'fake', provider: 'docker', machineId: 'fake', volume: 'fake', workspace: '/workspace' };
+
+class FakeRuntime implements SandboxRuntime {
+  calls: string[] = [];
+  async create() { return sandbox; }
+  async destroy() {}
+  async exec(_handle: SandboxHandle, request: ExecRequest): Promise<ExecResult> {
+    this.calls.push(request.command);
+    if (request.command.includes('wc -c')) return { exitCode: 0, stdout: '11\nhello world', stderr: '', timedOut: false, durationMs: 1 };
+    if (request.command.startsWith('if [ -f package.json ]')) return { exitCode: 0, stdout: 'npm test', stderr: '', timedOut: false, durationMs: 1 };
+    if (request.command === 'npm test') return { exitCode: 0, stdout: '2 passing\n', stderr: '', timedOut: false, durationMs: 1 };
+    return { exitCode: 0, stdout: '', stderr: '', timedOut: false, durationMs: 1 };
+  }
+}
+
+test('executor loops through tool calls and requires verification after edits', async () => {
+  const responses = [
+    '{"action":"read_file","path":"README.md"}',
+    '{"action":"write_file","path":"README.md","content":"updated"}',
+    '{"action":"finish","summary":"done"}',
+    '{"action":"run_tests"}',
+    '{"action":"finish","summary":"Updated README and verified tests."}',
+  ];
+  const runtime = new FakeRuntime();
+  const events: Array<[string, Record<string, unknown>]> = [];
+  const sink: ToolEventSink = { emit: async (type, payload) => { events.push([type, payload]); } };
+  const chatFn = async (_messages: ChatMessage[]) => ({ text: responses.shift()!, provider: 'openrouter' as const, model: 'fake' });
+  const result = await executeCodingTask('session-1', 'org-1', 'Update the README', sandbox, runtime, undefined, chatFn, sink);
+
+  assert.equal(result.summary, 'Updated README and verified tests.');
+  assert.equal(result.changed, true);
+  assert.equal(result.testsRun, true);
+  assert.ok(runtime.calls.some((command) => command === 'npm test'));
+  assert.ok(events.some(([type]) => type === 'file.created' || type === 'file.modified'));
+  assert.ok(events.some(([type]) => type === 'test.result'));
+});

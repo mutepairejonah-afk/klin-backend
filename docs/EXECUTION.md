@@ -65,11 +65,13 @@ code.
 2. The worker creates the container and volume, records `sandboxes`, and links
    `sessions.sandbox_id`.
 3. It clones the requested HTTPS repository, checks out the requested branch,
-   reports status, and runs the detected test command if available.
+   and reports status.
 4. Tool events are persisted before they reach SSE clients.
-5. The worker marks the sandbox idle and the session done after bootstrap. The
-   future agent loop will call the same tools one todo at a time, with approval
-   gates before commits, pushes, package installs, deploys, and external writes.
+5. The executor asks the configured model for one strict JSON action at a time,
+   calls the corresponding sandbox tool, appends the bounded result to the
+   model transcript, and repeats until `finish` or the 20-step safety limit.
+   Edits require a test action before finish; local commits require an operator
+   approval gate.
 6. On failure or cancellation, the session is marked failed and the sandbox is
    destroyed unless explicitly retained for development diagnosis.
 

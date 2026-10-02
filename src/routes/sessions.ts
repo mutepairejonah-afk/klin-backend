@@ -83,7 +83,7 @@ router.post('/', async (req, res) => {
   const codingRuntimeReady = process.env.KILN_EXECUTION_ENABLED === 'true' && process.env.ORCHESTRATOR_MODE === 'coding';
   const executionRequested = Boolean(input.repo || input.jobId);
   const run = executionRequested && codingRuntimeReady
-    ? executionWorker.enqueue({ sessionId: data.id, orgId: req.orgId!, actor: req.user!.email, repo: input.repo, branch: input.branch })
+    ? executionWorker.enqueue({ sessionId: data.id, orgId: req.orgId!, actor: req.user!.email, goal: input.goal, repo: input.repo, branch: input.branch, modelOverride })
     : llmConfigured() && !executionRequested
       ? runAgent(data.id, input.goal, input.agent, modelOverride)
       : runUnavailableOrchestrator(data.id, input.goal);
