@@ -9,6 +9,7 @@ import { llmConfigured } from '../lib/llm.js';
 import { appendAudit } from '../lib/audit.js';
 import { cancelSession, forgetSessionControl, pauseSession, resumeSession, steerSession } from '../lib/sessionControl.js';
 import { requireOperator } from '../middleware/auth.js';
+import { SANDBOX_INTENT } from '../lib/sandboxIntent.js';
 import { executionWorker } from '../worker/executionWorker.js';
 
 const router = Router();
@@ -47,6 +48,8 @@ const createSchema = z.object({
   repo: z.string().optional(),
   branch: z.string().optional(),
   connectors: z.array(z.string()).optional(),
+  // Force this session into the sandbox even without a repo or job.
+  sandbox: z.boolean().optional(),
   agent: z.object({ slug: z.string(), name: z.string(), systemPrompt: z.string().max(60_000) }).optional(),
 });
 
@@ -81,7 +84,7 @@ router.post('/', async (req, res) => {
   // Never simulate a successful coding run. Until a real execution runtime is
   // configured, fail explicitly rather than emitting fake edits, tests, or PRs.
   const codingRuntimeReady = process.env.KILN_EXECUTION_ENABLED === 'true' && process.env.ORCHESTRATOR_MODE === 'coding';
-  const executionRequested = Boolean(input.repo || input.jobId);
+  const executionRequested = Boolean(input.repo || input.jobId || (codingRuntimeReady && (input.sandbox === true || SANDBOX_INTENT.test(input.goal))));
   const run = executionRequested && codingRuntimeReady
     ? executionWorker.enqueue({ sessionId: data.id, orgId: req.orgId!, actor: req.user!.email, goal: input.goal, repo: input.repo, branch: input.branch, modelOverride })
     : llmConfigured() && !executionRequested
