@@ -3,6 +3,7 @@ import { supabaseAdmin } from '../lib/supabase.js';
 import { chat, type ChatMessage, type ModelOverride } from '../lib/llm.js';
 import { webSearch, needsResearch } from '../lib/websearch.js';
 import { checkpoint, SessionCancelledError, takeSteeringMessages } from '../lib/sessionControl.js';
+import { buildFollowupMessages } from './conversation.js';
 
 export interface Persona { slug: string; name: string; systemPrompt: string }
 
@@ -87,5 +88,58 @@ export async function runAgent(sessionId: string, goal: string, persona?: Person
     }
     await emitEvent(sessionId, 'error', { message: err instanceof Error ? err.message : String(err) });
     await setStatus('failed', { ended_at: new Date().toISOString() });
+  }
+}
+
+/** Answer a message sent after a text/chat session has finished. */
+export async function runAgentFollowup(
+  sessionId: string,
+  originalGoal: string,
+  currentMessage: string,
+  beforeSeq: number,
+  previousDurationSec: number | null | undefined,
+  modelOverride?: ModelOverride,
+) {
+  const started = Date.now();
+  const setStatus = async (status: string, extra: Record<string, unknown> = {}) => {
+    const { error } = await supabaseAdmin.from('sessions').update({ status, ...extra }).eq('id', sessionId);
+    if (error) throw error;
+  };
+
+  try {
+    const { data: history, error } = await supabaseAdmin
+      .from('events')
+      .select('type,payload')
+      .eq('session_id', sessionId)
+      .lt('seq', beforeSeq)
+      .order('seq', { ascending: true });
+    if (error) throw error;
+
+    await emitEvent(sessionId, 'action.started', {
+      role: 'executor', tool: 'model', verb: 'think', target: currentMessage.slice(0, 80),
+    });
+    const answer = await chat(
+      buildFollowupMessages(
+        `${BASE}\n\nThis is an ongoing conversation. Answer the user's latest message directly using the full conversation context. Do not give a generic greeting or return JSON unless the user asks for JSON.`,
+        originalGoal,
+        (history ?? []) as { type: string; payload: Record<string, unknown> }[],
+        currentMessage,
+      ),
+      { maxTokens: 3000 },
+      modelOverride,
+    );
+
+    await emitEvent(sessionId, 'action.completed', { tool: 'model', result: `${answer.provider} · ${answer.model}` });
+    await emitEvent(sessionId, 'thought', { role: 'executor', text: answer.text });
+    await emitEvent(sessionId, 'session.done', { summary: answer.text.slice(0, 280) });
+    await setStatus('done', {
+      ended_at: new Date().toISOString(),
+      duration_sec: Math.max(0, previousDurationSec ?? 0) + Math.round((Date.now() - started) / 1000),
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    try { await emitEvent(sessionId, 'error', { message }); } catch { /* retain the original failure */ }
+    try { await setStatus('failed', { ended_at: new Date().toISOString() }); } catch { /* retain the original failure */ }
+    console.error('session follow-up failed', { sessionId, error: message });
   }
 }

@@ -7,6 +7,7 @@ const base = z.object({ seq: z.number().int().nonnegative(), ts: z.string().date
 
 export const sessionEventSchema = z.union([
   base.extend({ type: z.literal('plan.updated'), payload: z.object({ todos: z.array(todo) }) }),
+  base.extend({ type: z.literal('message.user'), payload: z.object({ message: z.string() }) }),
   base.extend({ type: z.literal('thought'), payload: z.object({ role, text: z.string() }) }),
   base.extend({ type: z.literal('action.started'), payload: z.object({ role, tool, verb: z.string(), target: z.string() }) }),
   base.extend({ type: z.literal('action.completed'), payload: z.object({ tool, result: z.string().optional() }) }),
