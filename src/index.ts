@@ -73,8 +73,9 @@ app.get('/api/models', requireAuth, async (_req, res) => {
       { id: 'qwen/qwen-2.5-coder-32b-instruct:free', label: 'Qwen 2.5 Coder 32B (free)' },
     ] },
     google: { label: 'Google Gemini', models: [
-      { id: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash' },
-      { id: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro' },
+      { id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash' },
+      { id: 'gemini-3.6-flash', label: 'Gemini 3.6 Flash' },
+      { id: 'gemini-3.5-flash-lite', label: 'Gemini 3.5 Flash-Lite (fastest)' },
     ] },
     ollama: { label: 'Ollama Cloud', models: [
       { id: 'gpt-oss:20b', label: 'GPT-OSS 20B' },
