@@ -9,7 +9,7 @@ import { llmConfigured } from '../lib/llm.js';
 import { appendAudit } from '../lib/audit.js';
 import { cancelSession, forgetSessionControl, pauseSession, resumeSession, steerSession } from '../lib/sessionControl.js';
 import { requireOperator } from '../middleware/auth.js';
-import { executionWorker } from '../worker/executionWorker.js';
+import { enqueueCodingJob } from '../worker/queue.js';
 
 const router = Router();
 
@@ -82,13 +82,21 @@ router.post('/', async (req, res) => {
   // configured, fail explicitly rather than emitting fake edits, tests, or PRs.
   const codingRuntimeReady = process.env.KILN_EXECUTION_ENABLED === 'true' && process.env.ORCHESTRATOR_MODE === 'coding';
   const executionRequested = Boolean(input.repo || input.jobId);
-  const run = executionRequested && codingRuntimeReady
-    ? executionWorker.enqueue({ sessionId: data.id, orgId: req.orgId!, actor: req.user!.email, goal: input.goal, repo: input.repo, branch: input.branch, modelOverride })
-    : llmConfigured() && !executionRequested
+  if (executionRequested && codingRuntimeReady) {
+    try {
+      const executionJobId = await enqueueCodingJob({ sessionId: data.id, orgId: req.orgId!, actor: req.user!.email, goal: input.goal, repo: input.repo, branch: input.branch, modelOverride });
+      await req.db!.from('sessions').update({ job_id: executionJobId }).eq('id', data.id).eq('org_id', req.orgId);
+      await emitEvent(data.id, 'thought', { role: 'executor', text: `Queued for isolated worker execution (${executionJobId}).` });
+    } catch (err) {
+      await req.db!.from('sessions').update({ status: 'failed', ended_at: new Date().toISOString() }).eq('id', data.id).eq('org_id', req.orgId);
+      return res.status(503).json({ error: `execution queue unavailable: ${err instanceof Error ? err.message : String(err)}` });
+    }
+  } else {
+    const run = llmConfigured() && !executionRequested
       ? runAgent(data.id, input.goal, input.agent, modelOverride)
       : runUnavailableOrchestrator(data.id, input.goal);
-  Promise.resolve(run)
-    .catch((err) => console.error('orchestrator error', err));
+    Promise.resolve(run).catch((err) => console.error('orchestrator error', err));
+  }
 
   res.status(201).json(toSessionDTO(data));
 });

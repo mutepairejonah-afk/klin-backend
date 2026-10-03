@@ -1,0 +1,10 @@
+FROM node:20-bookworm-slim
+
+WORKDIR /app
+ENV NODE_ENV=development npm_config_update_notifier=false npm_config_fund=false
+COPY package*.json ./
+RUN npm ci
+COPY . .
+
+EXPOSE 8787
+CMD ["npm", "run", "dev"]

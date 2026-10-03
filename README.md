@@ -21,16 +21,16 @@ Postgres database.
 
 ## Execution plane
 
-The backend now includes a Docker-isolated execution baseline. Coding sessions
-are handled by a bounded `ExecutionWorker`, which provisions one non-root
-container and workspace volume per session and exposes filesystem, shell, Git,
-and test tools through `src/tools/sandboxTools.ts`. The worker is disabled by
-default; enable it only on a host with Docker and a pinned image using the
-`KILN_EXECUTION_*` settings in `.env.example`.
+The backend now includes a Docker-isolated execution plane. Coding sessions
+are persisted as Supabase `execution_jobs`; a standalone `ExecutionWorker`
+claims them and provisions one non-root container and workspace volume per
+session. Filesystem, shell, Git, and test tools are exposed through
+`src/tools/sandboxTools.ts`. The local Compose worker is disabled from the API
+by default; enable it with the `KILN_EXECUTION_*` settings in `.env.example`.
 
 See [`docs/EXECUTION.md`](docs/EXECUTION.md) for the isolation model, threat
-boundaries, lifecycle, and OpenSandbox replacement seam. The current queue is
-in-process and should move to BullMQ/Redis when the API is horizontally scaled.
+boundaries, Supabase queue, local Compose setup, and OpenSandbox replacement
+seam.
 
 ## Setup
 
@@ -65,9 +65,11 @@ in the frontend's `.env`.
 
 ## Database
 
-The deployment must apply the core schema plus the integrity migration in
-`supabase/migrations/0002_event_integrity.sql`. The latter adds the unique
-`(session_id, seq)` event invariant and approval lookup index. Keep the
+The deployment must apply the core schema plus the numbered integrity,
+approval-scope, and execution-queue migrations in
+`supabase/migrations/0002_event_integrity.sql`, `0003_approval_org_scope.sql`,
+and `0004_execution_jobs.sql`. These add the unique `(session_id, seq)` event
+invariant, approval organization scope, and atomic worker job claiming. Keep the
 database schema versioned alongside this service; do not rely on an invisible
 dashboard-only migration.
 

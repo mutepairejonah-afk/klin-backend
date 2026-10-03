@@ -9,7 +9,8 @@ uses the narrow tool adapters in `src/tools/sandboxTools.ts`.
 
 ```text
 API route
-  -> ExecutionWorker (bounded in-process queue; replaceable by BullMQ)
+  -> Supabase execution_jobs queue
+      -> standalone ExecutionWorker (bounded local concurrency)
       -> DockerSandboxRuntime
           -> container: non-root uid 1000, no capabilities, no-new-privileges,
              CPU/memory/PID quotas, /workspace volume, network=none by default
@@ -75,6 +76,35 @@ code.
 6. On failure or cancellation, the session is marked failed and the sandbox is
    destroyed unless explicitly retained for development diagnosis.
 
-The current queue is intentionally small and in-process. For multiple API
-instances, move `CodingJob` messages to BullMQ/Redis and run workers in a
-separate deployment; keep the runtime/tool interfaces unchanged.
+The queue is backed by Supabase Postgres, so multiple API instances can enqueue
+jobs safely. The local worker uses one execution slot by default; increase
+worker replicas or concurrency only after adding host-level resource limits.
+
+## Local Compose worker
+
+The repository now includes a Supabase-backed queue and local Compose stack.
+The API inserts `execution_jobs`; the standalone worker claims one job at a
+time through the `claim_execution_job` Postgres function. A heartbeat prevents
+an interrupted worker from holding a job forever, and stale jobs are requeued
+up to three attempts.
+
+Apply migrations `0002`, `0003`, and `0004` to the Supabase project, then create
+the local environment file:
+
+```bash
+cp .env.example .env
+# fill SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY, and model credentials
+docker compose build sandbox-image api worker
+docker compose up -d api worker
+docker compose logs -f worker
+```
+
+The worker image has Docker CLI and mounts `/var/run/docker.sock` so it can
+start sibling `klin-sandbox:local` containers. This is intentionally a local
+development setup: Docker socket access is equivalent to root on the host and
+must not be exposed to untrusted users or deployed as a public service.
+
+The sandbox containers themselves run with the existing non-root, capability-
+dropped, resource-limited Docker runtime. `KILN_SANDBOX_NETWORK=none` keeps
+their network disabled by default; package installation or private Git access
+requires an explicitly controlled local network.

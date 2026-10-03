@@ -1,0 +1,43 @@
+# Local execution stack. The worker uses the host Docker socket only so it can
+# create short-lived sibling sandbox containers. Do not expose this Compose
+# stack publicly; access to the socket is equivalent to root on the host.
+services:
+  sandbox-image:
+    image: klin-sandbox:local
+    build:
+      context: ./sandbox
+      dockerfile: Dockerfile
+    command: ["true"]
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    env_file: .env
+    environment:
+      PORT: 8787
+      KILN_EXECUTION_ENABLED: "true"
+      ORCHESTRATOR_MODE: coding
+    ports:
+      - "8787:8787"
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    env_file: .env
+    environment:
+      KILN_EXECUTION_ENABLED: "true"
+      ORCHESTRATOR_MODE: coding
+      KILN_SANDBOX_IMAGE: klin-sandbox:local
+      KILN_SANDBOX_NETWORK: none
+      KILN_WORKER_CONCURRENCY: 1
+      KILN_WORKER_POLL_MS: 2000
+      KILN_WORKER_STALE_SECONDS: 900
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      sandbox-image:
+        condition: service_completed_successfully
+    restart: unless-stopped
