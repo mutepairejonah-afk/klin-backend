@@ -29,6 +29,8 @@ export interface SandboxHandle {
 export interface SandboxRuntime {
   create(sessionId: string): Promise<SandboxHandle>;
   destroy(handle: SandboxHandle): Promise<void>;
+  /** Interrupts all work in a session sandbox without exposing its credentials. */
+  interrupt?(handle: SandboxHandle): Promise<void>;
   exec(handle: SandboxHandle, request: ExecRequest): Promise<ExecResult>;
   /** Rebuild a handle for an already-provisioned sandbox (machine id from the sandboxes table). */
   attach(sessionId: string, machineId: string): SandboxHandle;
@@ -38,11 +40,21 @@ export interface ToolEventSink {
   emit(type: string, payload: Record<string, unknown>): Promise<void>;
 }
 
+export interface GitHubExecutionContext {
+  repository: string;
+  baseBranch: string;
+  workBranch: string;
+  token: string;
+  username?: string;
+}
+
 export interface ToolContext {
   sessionId: string;
   sandbox: SandboxHandle;
   runtime: SandboxRuntime;
   events: ToolEventSink;
+  /** Never serialized into the model transcript or tool result. */
+  github?: GitHubExecutionContext;
 }
 
 export interface FileEntry {

@@ -151,6 +151,33 @@ router.get('/:id/replay', async (req, res) => {
 });
 
 // POST /sessions/:id/pause | /resume
+router.post('/:id/cancel', async (req, res) => {
+  const { data: session, error: lookupError } = await req.db!.from('sessions')
+    .select('id,status').eq('id', req.params.id).eq('org_id', req.orgId).maybeSingle();
+  if (lookupError) return res.status(500).json({ error: lookupError.message });
+  if (!session) return res.status(404).json({ error: 'not found' });
+  if (session.status === 'done' || session.status === 'failed') return res.status(409).json({ error: 'session is already finished' });
+
+  cancelSession(req.params.id);
+  let workerState: 'queued' | 'running' | 'unknown' = 'unknown';
+  try {
+    workerState = await executionWorker.cancel(req.params.id);
+  } catch (error) {
+    // The cancellation signal remains set; the worker will stop at its next
+    // checkpoint even if the runtime's immediate interrupt request fails.
+    console.error('sandbox interrupt failed', { sessionId: req.params.id, error });
+  }
+
+  if (workerState === 'queued') {
+    await req.db!.from('sessions').update({ status: 'failed', ended_at: new Date().toISOString() })
+      .eq('id', req.params.id).eq('org_id', req.orgId).eq('status', 'queued');
+    await emitEvent(req.params.id, 'error', { message: 'Session cancelled by user.' });
+    forgetSessionControl(req.params.id);
+  }
+  await appendAudit({ orgId: req.orgId!, actor: req.user!.email, action: 'session.cancelled', sessionId: req.params.id, ip: req.ip });
+  res.status(202).json({ accepted: true });
+});
+
 router.post('/:id/pause', async (req, res) => {
   const { data: session, error: lookupError } = await req.db!.from('sessions').select('id,status').eq('id', req.params.id).eq('org_id', req.orgId).maybeSingle();
   if (lookupError) return res.status(500).json({ error: lookupError.message });

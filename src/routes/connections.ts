@@ -7,6 +7,14 @@ import { requireOperator } from '../middleware/auth.js';
 
 const router = Router();
 
+function githubExecutionConfigured() {
+  const provider = (process.env.KILN_SANDBOX_PROVIDER ?? 'docker').toLowerCase();
+  const egressReady = provider === 'daytona'
+    ? Boolean(process.env.DAYTONA_API_KEY)
+    : provider === 'docker' && Boolean(process.env.KILN_SANDBOX_NETWORK && process.env.KILN_SANDBOX_NETWORK.toLowerCase() !== 'none');
+  return process.env.KILN_EXECUTION_ENABLED === 'true' && process.env.ORCHESTRATOR_MODE === 'coding' && egressReady;
+}
+
 // Providers with a real OAuth flow wired up below. Unsupported providers stay
 // visibly disconnected until their credentials flow is implemented.
 const REAL_OAUTH = new Set(['github']);
@@ -119,10 +127,17 @@ router.get('/', async (req, res) => {
 
   res.json(CONNECTOR_CATALOG.map((c) => {
     const row = byProvider.get(c.id);
+    const oauthConfigured = c.id !== 'github' || Boolean(
+      process.env.GITHUB_OAUTH_CLIENT_ID &&
+      process.env.GITHUB_OAUTH_CLIENT_SECRET &&
+      (process.env.NODE_ENV !== 'production' || process.env.CONNECTION_ENC_KEY),
+    );
     return {
       id: c.id, name: c.name, description: c.description, scopes: c.scopes,
       connected: row?.connected ?? false,
       oauth: REAL_OAUTH.has(c.id),
+      oauthConfigured,
+      githubExecutionConfigured: c.id === 'github' ? githubExecutionConfigured() : undefined,
       meta: row?.meta ?? undefined,
       lastUsedAt: row?.last_used_at ?? undefined,
     };

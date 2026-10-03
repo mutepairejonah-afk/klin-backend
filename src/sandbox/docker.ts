@@ -14,10 +14,11 @@ function bounded(value: string) {
   return value.length > MAX_OUTPUT ? `${value.slice(0, MAX_OUTPUT)}\n[output truncated]` : value;
 }
 
-function runDocker(args: string[], request?: { timeoutMs?: number; onStdout?: (s: string) => void; onStderr?: (s: string) => void }): Promise<ExecResult> {
+function runDocker(args: string[], request?: { timeoutMs?: number; onStdout?: (s: string) => void; onStderr?: (s: string) => void; input?: string }): Promise<ExecResult> {
   return new Promise((resolve, reject) => {
     const started = Date.now();
-    const child = spawn('docker', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn('docker', args, { stdio: ['pipe', 'pipe', 'pipe'] });
+    child.stdin.end(request?.input);
     let stdout = '';
     let stderr = '';
     let timedOut = false;
@@ -105,14 +106,27 @@ export class DockerSandboxRuntime implements SandboxRuntime {
     if (handle.volume) await runDocker(['volume', 'rm', '-f', handle.volume], { timeoutMs: 30_000 });
   }
 
+  async interrupt(handle: SandboxHandle): Promise<void> {
+    const result = await runDocker(['kill', handle.machineId], { timeoutMs: 30_000 });
+    if (result.exitCode !== 0 && !/no such container|not found/i.test(result.stderr)) {
+      throw new Error(`docker sandbox interrupt failed: ${result.stderr}`);
+    }
+  }
+
   async exec(handle: SandboxHandle, request: ExecRequest): Promise<ExecResult> {
     const cwd = request.cwd ?? handle.workspace;
     if (!(cwd === handle.workspace || cwd.startsWith(`${handle.workspace}/`)) || cwd.includes('..')) throw new Error('cwd must remain inside the sandbox workspace');
-    const envArgs = Object.entries(request.env ?? {}).flatMap(([key, value]) => ['-e', `${key}=${value}`]);
+    const env = { ...(request.env ?? {}) };
+    const githubToken = env.KILN_GITHUB_TOKEN;
+    delete env.KILN_GITHUB_TOKEN;
+    const envArgs = Object.entries(env).flatMap(([key, value]) => ['-e', `${key}=${value}`]);
     const seconds = Math.ceil(Math.min(Math.max(request.timeoutMs ?? DEFAULT_TIMEOUT_MS, 1), MAX_TIMEOUT_MS) / 1000);
+    const command = githubToken
+      ? `IFS= read -r KILN_GITHUB_TOKEN; export KILN_GITHUB_TOKEN; ${request.command}`
+      : request.command;
     return runDocker([
       'exec', '-i', '--user', '1000:1000', '-w', cwd, ...envArgs,
-      handle.machineId, 'timeout', '--kill-after=5s', `${seconds}s`, 'sh', '-lc', request.command,
-    ], request);
+      handle.machineId, 'timeout', '--kill-after=5s', `${seconds}s`, 'sh', '-lc', command,
+    ], { ...request, input: githubToken ? `${githubToken}\n` : undefined });
   }
 }

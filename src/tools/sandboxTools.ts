@@ -1,4 +1,6 @@
-import { ExecResult, FileEntry, TestResult, ToolContext } from '../sandbox/types.js';
+import { randomUUID } from 'node:crypto';
+import { sessionSignal } from '../lib/sessionControl.js';
+import { ExecResult, FileEntry, GitHubExecutionContext, TestResult, ToolContext } from '../sandbox/types.js';
 
 const MAX_FILE_BYTES = 512 * 1024;
 const MAX_LIST_ENTRIES = 2_000;
@@ -18,9 +20,9 @@ function lines(text: string) {
   return text.split(/\r?\n/).filter(Boolean).slice(0, 5_000);
 }
 
-async function exec(context: ToolContext, command: string, cwd = '/workspace', timeoutMs = 120_000): Promise<ExecResult> {
+async function exec(context: ToolContext, command: string, cwd = '/workspace', timeoutMs = 120_000, env?: Record<string, string>): Promise<ExecResult> {
   return context.runtime.exec(context.sandbox, {
-    command, cwd, timeoutMs,
+    command, cwd, timeoutMs, env,
     onStdout: (chunk) => { for (const line of lines(chunk)) void context.events.emit('terminal.stdout', { line }); },
     onStderr: (chunk) => { for (const line of lines(chunk)) void context.events.emit('terminal.stderr', { line }); },
   });
@@ -89,11 +91,15 @@ export async function applyPatch(context: ToolContext, patch: string) {
   return { applied: true, summary: result.stdout.trim() };
 }
 
-export async function gitClone(context: ToolContext, url: string, destination = '.') {
+export async function gitClone(context: ToolContext, url: string, destination = '.', githubToken?: string, githubUsername?: string) {
   if (!/^https:\/\//i.test(url) || /[;&|`$\n\r]/.test(url)) throw new Error('git clone only accepts an HTTPS URL');
   const target = destination === '.' ? '/workspace' : workspacePath(destination);
   await context.events.emit('action.started', { role: 'executor', tool: 'git', verb: 'clone', target: url });
-  const result = await exec(context, `git clone -- ${shellQuote(url)} ${shellQuote(target)}`, '/workspace', 5 * 60_000);
+  let command = `git clone -- ${shellQuote(url)} ${shellQuote(target)}`;
+  if (githubToken) {
+    command = withGitHubAskpass(command);
+  }
+  const result = await exec(context, command, '/workspace', 5 * 60_000, githubToken ? { KILN_GITHUB_TOKEN: githubToken, KILN_GITHUB_USERNAME: githubUsername || 'x-access-token' } : undefined);
   await context.events.emit('action.completed', { tool: 'git', result: `exit ${result.exitCode}` });
   if (result.exitCode !== 0) throw new Error(result.stderr || 'git clone failed');
   return { url, destination };
@@ -103,7 +109,12 @@ export async function gitStatus(context: ToolContext) { return shellExec(context
 export async function gitDiff(context: ToolContext) { return shellExec(context, 'git diff -- .'); }
 export async function gitBranch(context: ToolContext, name?: string) {
   if (name && !/^[A-Za-z0-9._/-]{1,120}$/.test(name)) throw new Error('invalid branch name');
-  return shellExec(context, name ? `git switch -c ${shellQuote(name)}` : 'git branch --show-current');
+  if (!name) return shellExec(context, 'git branch --show-current');
+  const localRef = shellQuote(`refs/heads/${name}`);
+  const remoteRef = shellQuote(`refs/remotes/origin/${name}`);
+  const branch = shellQuote(name);
+  const remoteBranch = shellQuote(`origin/${name}`);
+  return shellExec(context, `if git show-ref --quiet --verify ${localRef}; then git switch --quiet -- ${branch}; elif git show-ref --quiet --verify ${remoteRef}; then git switch --quiet --track --create ${branch} ${remoteBranch}; else git switch --quiet --create ${branch}; fi`);
 }
 
 export async function gitCommit(context: ToolContext, message: string) {
@@ -113,6 +124,73 @@ export async function gitCommit(context: ToolContext, message: string) {
   const sha = (await exec(context, 'git rev-parse HEAD', '/workspace', 10_000)).stdout.trim();
   await context.events.emit('git.commit', { sha, message });
   return { sha, message };
+}
+
+export async function gitPush(context: ToolContext) {
+  const github = requireGitHubContext(context);
+  const branch = (await exec(context, 'git branch --show-current', '/workspace', 10_000)).stdout.trim();
+  if (!branch || branch !== github.workBranch) throw new Error(`Refusing to push ${branch || 'an unknown branch'}; only the session feature branch ${github.workBranch} may be pushed.`);
+  if (!/^[A-Za-z0-9._/-]{1,120}$/.test(branch)) throw new Error('invalid branch name');
+  await context.events.emit('action.started', { role: 'executor', tool: 'git', verb: 'push', target: `${github.repository}:${branch}` });
+  const command = withGitHubAskpass(`git push --set-upstream origin -- ${shellQuote(branch)}`);
+  const result = await exec(context, command, '/workspace', 5 * 60_000, { KILN_GITHUB_TOKEN: github.token, KILN_GITHUB_USERNAME: github.username || 'x-access-token' });
+  await context.events.emit('action.completed', { tool: 'git', result: `push exit ${result.exitCode}` });
+  if (result.exitCode !== 0) throw new Error(result.stderr || 'git push failed');
+  return { repository: github.repository, branch };
+}
+
+export async function githubCreatePullRequest(context: ToolContext, title: string, body: string) {
+  const github = requireGitHubContext(context);
+  if (!title.trim() || title.length > 256) throw new Error('pull request title must be 1-256 characters');
+  if (body.length > 20_000) throw new Error('pull request description must be 20,000 characters or fewer');
+  const branch = (await exec(context, 'git branch --show-current', '/workspace', 10_000)).stdout.trim();
+  if (!branch || branch !== github.workBranch) throw new Error(`Refusing to open a pull request from ${branch || 'an unknown branch'}; expected ${github.workBranch}.`);
+  const [owner, name] = github.repository.split('/');
+  await context.events.emit('action.started', { role: 'executor', tool: 'github', verb: 'open_pull_request', target: `${github.repository}:${branch} → ${github.baseBranch}` });
+  const response = await fetch(`https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/pulls`, {
+    method: 'POST',
+    headers: {
+      Accept: 'application/vnd.github+json',
+      Authorization: `Bearer ${github.token}`,
+      'User-Agent': 'klin-app',
+      'X-GitHub-Api-Version': '2022-11-28',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ title: title.trim(), body, head: branch, base: github.baseBranch }),
+    signal: AbortSignal.any([sessionSignal(context.sessionId), AbortSignal.timeout(30_000)]),
+  });
+  const result: any = await response.json().catch(() => ({}));
+  if (!response.ok || typeof result.html_url !== 'string') {
+    throw new Error(`GitHub could not open the pull request (${response.status}): ${String(result.message ?? 'unknown error').slice(0, 200)}`);
+  }
+  const artifact = {
+    id: randomUUID(), sessionId: context.sessionId, kind: 'pr' as const,
+    title: result.title ?? title.trim(), url: result.html_url, createdAt: new Date().toISOString(),
+  };
+  await context.events.emit('git.pr_opened', { url: result.html_url, title: artifact.title });
+  await context.events.emit('artifact.created', artifact);
+  await context.events.emit('action.completed', { tool: 'github', result: result.html_url });
+  return { url: result.html_url, title: artifact.title, base: github.baseBranch, head: branch };
+}
+
+function requireGitHubContext(context: ToolContext): GitHubExecutionContext {
+  if (!context.github?.repository || !context.github.baseBranch || !context.github.workBranch || !context.github.token) {
+    throw new Error('Connect GitHub and select a repository and base branch to use GitHub write actions.');
+  }
+  return context.github;
+}
+
+function withGitHubAskpass(command: string) {
+  const askpass = `/tmp/klin-git-askpass-${randomUUID()}`;
+  const source = `#!/bin/sh
+case "$1" in
+  *Username*"https://github.com':"*) printf "%s\\n" "$KILN_GITHUB_USERNAME" ;;
+  *Password*"https://github.com':"*) printf "%s\\n" "$KILN_GITHUB_TOKEN" ;;
+  *) exit 1 ;;
+esac
+`;
+  const encoded = Buffer.from(source, 'utf8').toString('base64');
+  return `askpass=${shellQuote(askpass)}; printf %s ${shellQuote(encoded)} | base64 -d > "$askpass" && chmod 700 "$askpass" && GIT_ASKPASS="$askpass" GIT_TERMINAL_PROMPT=0 ${command}; result=$?; rm -f "$askpass"; exit "$result"`;
 }
 
 function parseTestResult(result: ExecResult): TestResult {

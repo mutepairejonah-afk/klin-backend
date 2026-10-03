@@ -2,7 +2,7 @@ import { emitEvent } from '../lib/eventBus.js';
 import { supabaseAdmin } from '../lib/supabase.js';
 import { chat, type ChatMessage, type ModelOverride } from '../lib/llm.js';
 import { webSearch, needsResearch } from '../lib/websearch.js';
-import { checkpoint, SessionCancelledError, takeSteeringMessages } from '../lib/sessionControl.js';
+import { checkpoint, forgetSessionControl, sessionSignal, SessionCancelledError, takeSteeringMessages } from '../lib/sessionControl.js';
 import { buildFollowupMessages } from './conversation.js';
 
 export interface Persona { slug: string; name: string; systemPrompt: string }
@@ -16,6 +16,7 @@ function system(persona?: Persona) {
 }
 
 export async function runAgent(sessionId: string, goal: string, persona?: Persona, modelOverride?: ModelOverride) {
+  const signal = sessionSignal(sessionId);
   const setStatus = (status: string, extra: Record<string, unknown> = {}) =>
     supabaseAdmin.from('sessions').update({ status, ...extra }).eq('id', sessionId);
   const started = Date.now();
@@ -56,10 +57,13 @@ export async function runAgent(sessionId: string, goal: string, persona?: Person
     ];
     let steps = ['Answer the question'];
     try {
-      const plan = await chat(msgs, { json: true, maxTokens: 400 }, modelOverride);
+      const plan = await chat(msgs, { json: true, maxTokens: 400, signal }, modelOverride);
       const parsed = JSON.parse(plan.text.replace(/```json|```/g, '').trim());
       if (Array.isArray(parsed.steps) && parsed.steps.length) steps = parsed.steps.slice(0, 5).map(String);
-    } catch { /* fall back to the default single-step plan; the main call below reports real failures */ }
+    } catch {
+      if (signal.aborted) throw new SessionCancelledError();
+      /* fall back to the default single-step plan; the main call below reports real failures */
+    }
     await emitEvent(sessionId, 'plan.updated', { todos: todo(steps, 0) });
 
     await setStatus('executing');
@@ -71,9 +75,10 @@ export async function runAgent(sessionId: string, goal: string, persona?: Person
         { role: 'system', content: system(persona) },
         { role: 'user', content: `Goal: ${goal}${researchContext ? `\n\n${researchContext}` : ''}\n\nPlan:\n${steps.map((s, i) => `${i + 1}. ${s}`).join('\n')}${finalSteering.length ? `\n\nAdditional user steering:\n${finalSteering.join('\n')}` : ''}\n\nCarry out the plan and give the full result.` },
       ],
-      { maxTokens: 3000 },
+      { maxTokens: 3000, signal },
       modelOverride,
     );
+    await checkpoint(sessionId);
     await emitEvent(sessionId, 'action.completed', { tool: 'model', result: `${answer.provider} · ${answer.model}` });
     await emitEvent(sessionId, 'thought', { role: 'executor', text: answer.text });
     await emitEvent(sessionId, 'plan.updated', { todos: todo(steps, steps.length) });
@@ -81,13 +86,15 @@ export async function runAgent(sessionId: string, goal: string, persona?: Person
     await emitEvent(sessionId, 'session.done', { summary: answer.text.slice(0, 280) });
     await setStatus('done', { ended_at: new Date().toISOString(), duration_sec: Math.round((Date.now() - started) / 1000), cost_usd: 0 });
   } catch (err) {
-    if (err instanceof SessionCancelledError) {
+    if (signal.aborted || err instanceof SessionCancelledError) {
       await emitEvent(sessionId, 'error', { message: 'Session cancelled by user.' });
       await setStatus('failed', { ended_at: new Date().toISOString() });
       return;
     }
     await emitEvent(sessionId, 'error', { message: err instanceof Error ? err.message : String(err) });
     await setStatus('failed', { ended_at: new Date().toISOString() });
+  } finally {
+    forgetSessionControl(sessionId);
   }
 }
 
@@ -100,6 +107,7 @@ export async function runAgentFollowup(
   previousDurationSec: number | null | undefined,
   modelOverride?: ModelOverride,
 ) {
+  const signal = sessionSignal(sessionId);
   const started = Date.now();
   const setStatus = async (status: string, extra: Record<string, unknown> = {}) => {
     const { error } = await supabaseAdmin.from('sessions').update({ status, ...extra }).eq('id', sessionId);
@@ -125,9 +133,10 @@ export async function runAgentFollowup(
         (history ?? []) as { type: string; payload: Record<string, unknown> }[],
         currentMessage,
       ),
-      { maxTokens: 3000 },
+      { maxTokens: 3000, signal },
       modelOverride,
     );
+    await checkpoint(sessionId);
 
     await emitEvent(sessionId, 'action.completed', { tool: 'model', result: `${answer.provider} · ${answer.model}` });
     await emitEvent(sessionId, 'thought', { role: 'executor', text: answer.text });
@@ -137,9 +146,13 @@ export async function runAgentFollowup(
       duration_sec: Math.max(0, previousDurationSec ?? 0) + Math.round((Date.now() - started) / 1000),
     });
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = signal.aborted || err instanceof SessionCancelledError
+      ? 'Session cancelled by user.'
+      : err instanceof Error ? err.message : String(err);
     try { await emitEvent(sessionId, 'error', { message }); } catch { /* retain the original failure */ }
     try { await setStatus('failed', { ended_at: new Date().toISOString() }); } catch { /* retain the original failure */ }
     console.error('session follow-up failed', { sessionId, error: message });
+  } finally {
+    forgetSessionControl(sessionId);
   }
 }
