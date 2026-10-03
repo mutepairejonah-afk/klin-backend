@@ -125,6 +125,18 @@ export class DaytonaSandboxRuntime implements SandboxRuntime {
     await this.daytona().delete(sandbox);
   }
 
+  async interrupt(handle: SandboxHandle): Promise<void> {
+    this.cache.delete(handle.machineId);
+    let sandbox: Sandbox;
+    try {
+      sandbox = await this.daytona().get(handle.machineId);
+    } catch (error) {
+      if (/not found|404/i.test(error instanceof Error ? error.message : String(error))) return;
+      throw error;
+    }
+    await this.daytona().delete(sandbox);
+  }
+
   async exec(handle: SandboxHandle, request: ExecRequest): Promise<ExecResult> {
     const cwd = request.cwd ?? handle.workspace;
     if (!(cwd === handle.workspace || cwd.startsWith(`${handle.workspace}/`)) || cwd.includes('..')) throw new Error('cwd must remain inside the sandbox workspace');

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { checkpoint, pauseSession, resumeSession, cancelSession, SessionCancelledError } from '../src/lib/sessionControl.js';
+import { checkpoint, pauseSession, resumeSession, cancelSession, forgetSessionControl, sessionSignal, SessionCancelledError } from '../src/lib/sessionControl.js';
 import { sessionEventSchema } from '../src/contracts/events.js';
 
 test('checkpoint blocks while paused and resumes cleanly', async () => {
@@ -17,8 +17,11 @@ test('checkpoint blocks while paused and resumes cleanly', async () => {
 
 test('checkpoint rejects after cancellation', async () => {
   const id = `test-${Date.now()}-cancel`;
+  const signal = sessionSignal(id);
   cancelSession(id);
+  assert.equal(signal.aborted, true);
   await assert.rejects(checkpoint(id), (error: unknown) => error instanceof SessionCancelledError);
+  forgetSessionControl(id);
 });
 
 test('event contract rejects fabricated or malformed events', () => {

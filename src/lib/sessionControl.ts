@@ -16,6 +16,7 @@ interface ControlState {
   cancelled: boolean;
   messages: string[];
   wake: (() => void) | null;
+  controller: AbortController;
 }
 
 const controls = new Map<string, ControlState>();
@@ -23,10 +24,14 @@ const controls = new Map<string, ControlState>();
 function stateFor(id: string): ControlState {
   let state = controls.get(id);
   if (!state) {
-    state = { paused: false, cancelled: false, messages: [], wake: null };
+    state = { paused: false, cancelled: false, messages: [], wake: null, controller: new AbortController() };
     controls.set(id, state);
   }
   return state;
+}
+
+export function sessionSignal(id: string): AbortSignal {
+  return stateFor(id).controller.signal;
 }
 
 function notify(state: ControlState) {
@@ -48,6 +53,7 @@ export function cancelSession(id: string) {
   const state = stateFor(id);
   state.cancelled = true;
   state.paused = false;
+  state.controller.abort();
   notify(state);
 }
 

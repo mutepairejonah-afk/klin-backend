@@ -2,6 +2,8 @@
 // OpenAI chat-completions dialect except Anthropic, which gets its own
 // request shape below. Providers are tried in order; a rate limit (429),
 // server error, or timeout falls through to the next one.
+import { SessionCancelledError } from './sessionControl.js';
+
 export interface ChatMessage { role: 'system' | 'user' | 'assistant'; content: string }
 
 export type ProviderName = 'openrouter' | 'google' | 'anthropic' | 'ollama';
@@ -96,7 +98,7 @@ function providers(override?: ModelOverride): Provider[] {
 export const llmConfigured = () => basProviders().length > 0;
 export const availableProviders = (): ProviderName[] => basProviders().map((p) => p.name);
 
-export async function chat(messages: ChatMessage[], opts: { json?: boolean; maxTokens?: number } = {}, override?: ModelOverride) {
+export async function chat(messages: ChatMessage[], opts: { json?: boolean; maxTokens?: number; signal?: AbortSignal } = {}, override?: ModelOverride) {
   const errors: string[] = [];
   const all = providers(override);
   const now = Date.now();
@@ -112,6 +114,9 @@ export async function chat(messages: ChatMessage[], opts: { json?: boolean; maxT
     for (const model of models) {
       try {
         const ctrl = new AbortController();
+        const abortFromSession = () => ctrl.abort();
+        if (opts.signal?.aborted) throw new Error('session cancelled');
+        opts.signal?.addEventListener('abort', abortFromSession, { once: true });
         const timer = setTimeout(() => ctrl.abort(), 90_000);
         const isAnthropic = !!p.anthropic;
         const sys = messages.find((m) => m.role === 'system')?.content;
@@ -124,29 +129,35 @@ export async function chat(messages: ChatMessage[], opts: { json?: boolean; maxT
               max_tokens: opts.maxTokens ?? 2000,
               ...(opts.json ? { response_format: { type: 'json_object' } } : {}),
             };
-        const r = await fetch(p.url, {
-          method: 'POST',
-          signal: ctrl.signal,
-          headers: isAnthropic
-            ? { 'Content-Type': 'application/json', 'x-api-key': p.key, 'anthropic-version': '2023-06-01' }
-            : { 'Content-Type': 'application/json', Authorization: `Bearer ${p.key}`, ...p.headers },
-          body: JSON.stringify(body),
-        }).finally(() => clearTimeout(timer));
-        if (!r.ok) {
-          const text = await r.text();
-          const err: any = new Error(briefError(r.status, text));
-          err.status = r.status;
-          err.retryAfter = Number(r.headers.get('retry-after')) || 0;
-          throw err;
+        try {
+          const r = await fetch(p.url, {
+            method: 'POST',
+            signal: ctrl.signal,
+            headers: isAnthropic
+              ? { 'Content-Type': 'application/json', 'x-api-key': p.key, 'anthropic-version': '2023-06-01' }
+              : { 'Content-Type': 'application/json', Authorization: `Bearer ${p.key}`, ...p.headers },
+            body: JSON.stringify(body),
+          });
+          if (!r.ok) {
+            const text = await r.text();
+            const err: any = new Error(briefError(r.status, text));
+            err.status = r.status;
+            err.retryAfter = Number(r.headers.get('retry-after')) || 0;
+            throw err;
+          }
+          const data: any = await r.json();
+          const text: string | undefined = isAnthropic
+            ? data?.content?.find((b: any) => b.type === 'text')?.text
+            : data?.choices?.[0]?.message?.content;
+          if (!text) throw new Error('empty response');
+          cooldownUntil.delete(p.name);
+          return { text, provider: p.name, model };
+        } finally {
+          clearTimeout(timer);
+          opts.signal?.removeEventListener('abort', abortFromSession);
         }
-        const data: any = await r.json();
-        const text: string | undefined = isAnthropic
-          ? data?.content?.find((b: any) => b.type === 'text')?.text
-          : data?.choices?.[0]?.message?.content;
-        if (!text) throw new Error('empty response');
-        cooldownUntil.delete(p.name);
-        return { text, provider: p.name, model };
       } catch (e: any) {
+        if (opts.signal?.aborted) throw new SessionCancelledError();
         errors.push(`${p.name}/${model}: ${e instanceof Error ? e.message : String(e)}`);
         if (e?.status === 404 && p.fallbackModels?.length) {
           // Model retired or unavailable: remember, and try the next candidate.

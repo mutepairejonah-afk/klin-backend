@@ -54,3 +54,22 @@ test('error message is concise, not a raw JSON dump', async () => {
     return true;
   });
 });
+
+test('a session stop aborts the active provider request without trying another provider', async () => {
+  process.env.OPENROUTER_API_KEY = 'a';
+  process.env.GEMINI_API_KEY = 'b';
+  process.env.PROVIDER_ORDER = 'openrouter,google';
+  const controller = new AbortController();
+  let calls = 0;
+  globalThis.fetch = (async (_url: any, init: any) => {
+    calls += 1;
+    return new Promise((_resolve, reject) => {
+      init.signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true });
+    });
+  }) as typeof fetch;
+
+  const pending = chat([{ role: 'user', content: 'long request' }], { signal: controller.signal });
+  controller.abort();
+  await assert.rejects(pending, /cancelled/);
+  assert.equal(calls, 1, 'cancellation must not fall through to another configured provider');
+});
