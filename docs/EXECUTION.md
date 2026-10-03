@@ -17,6 +17,15 @@ API route
       -> events table (persist before SSE broadcast)
 ```
 
+Set `KILN_SANDBOX_PROVIDER=daytona` to run the same contract on Daytona
+(`src/sandbox/daytona.ts`): one Daytona sandbox per session, `/workspace` as the
+working directory, labels `klin.session`, an auto-stop interval as a leak guard,
+and `networkBlockAll` when `KILN_SANDBOX_NETWORK=none`. The key is read from
+`DAYTONA_API_KEY` at first use only. Daytona returns merged stdout/stderr and no
+live stream, so terminal events arrive when a command finishes. The `sandboxes`
+row records the real provider, so the dev exec route reattaches with the right
+runtime.
+
 The runtime interface is deliberately independent of Docker. OpenSandbox can
 replace `DockerSandboxRuntime` by implementing `SandboxRuntime` with the same
 `create`, `exec`, and `destroy` contract. The worker does not receive a Docker

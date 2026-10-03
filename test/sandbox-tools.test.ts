@@ -10,6 +10,7 @@ class FakeRuntime implements SandboxRuntime {
   commands: string[] = [];
   async create() { return handle; }
   async destroy() {}
+  attach() { return handle; }
   async exec(_handle: SandboxHandle, request: ExecRequest): Promise<ExecResult> {
     this.commands.push(request.command);
     if (request.command.startsWith('test -e')) return { exitCode: this.files.has('/workspace/a.txt') ? 0 : 1, stdout: '', stderr: '', timedOut: false, durationMs: 1 };

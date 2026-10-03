@@ -19,9 +19,10 @@ export interface ExecResult {
 
 export interface SandboxHandle {
   id: string;
-  provider: 'docker';
+  provider: 'docker' | 'daytona';
   machineId: string;
-  volume: string;
+  /** Docker named volume. Not used by providers that manage their own disk. */
+  volume?: string;
   workspace: string;
 }
 
@@ -29,6 +30,8 @@ export interface SandboxRuntime {
   create(sessionId: string): Promise<SandboxHandle>;
   destroy(handle: SandboxHandle): Promise<void>;
   exec(handle: SandboxHandle, request: ExecRequest): Promise<ExecResult>;
+  /** Rebuild a handle for an already-provisioned sandbox (machine id from the sandboxes table). */
+  attach(sessionId: string, machineId: string): SandboxHandle;
 }
 
 export interface ToolEventSink {

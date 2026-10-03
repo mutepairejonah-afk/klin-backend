@@ -1,10 +1,9 @@
 import { Router } from 'express';
 import { requireOperator } from '../middleware/auth.js';
-import { DockerSandboxRuntime } from '../sandbox/docker.js';
+import { runtimeFor } from '../sandbox/index.js';
 import { shellExec } from '../tools/sandboxTools.js';
 
 const router = Router();
-const runtime = new DockerSandboxRuntime();
 
 // POST /sandboxes/:id/exec — operator-only dev/debug surface. Agent work uses
 // the worker and tool API; this endpoint exists for diagnosis and is disabled
@@ -19,12 +18,13 @@ router.post('/:id/exec', requireOperator, async (req, res) => {
   if (!Number.isFinite(timeoutMs) || timeoutMs < 1 || timeoutMs > 900_000) return res.status(400).json({ error: 'timeoutMs must be between 1 and 900000' });
 
   const { data: row, error } = await req.db!.from('sandboxes')
-    .select('id, session_id, machine_id')
+    .select('id, session_id, machine_id, provider')
     .eq('id', req.params.id)
     .maybeSingle();
   if (error) return res.status(500).json({ error: error.message });
   if (!row?.machine_id) return res.status(404).json({ error: 'sandbox not found' });
 
+  const runtime = runtimeFor(row.provider);
   const sandbox = runtime.attach(row.session_id, row.machine_id);
   try {
     const result = await shellExec({ sessionId: row.session_id, sandbox, runtime, events: {

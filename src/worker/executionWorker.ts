@@ -2,7 +2,7 @@ import { supabaseAdmin } from '../lib/supabase.js';
 import { appendAudit } from '../lib/audit.js';
 import { checkpoint } from '../lib/sessionControl.js';
 import { emitEvent } from '../lib/eventBus.js';
-import { DockerSandboxRuntime } from '../sandbox/docker.js';
+import { createSandboxRuntime } from '../sandbox/index.js';
 import { SandboxHandle, SandboxRuntime } from '../sandbox/types.js';
 import { eventSink, gitClone, gitBranch, gitStatus } from '../tools/sandboxTools.js';
 import { executeCodingTask } from '../orchestrator/executor.js';
@@ -25,7 +25,7 @@ export class ExecutionWorker {
   private active = 0;
   private readonly concurrency: number;
 
-  constructor(private readonly runtime: SandboxRuntime = new DockerSandboxRuntime(), concurrency = Number(process.env.KILN_WORKER_CONCURRENCY ?? 2)) {
+  constructor(private readonly runtime: SandboxRuntime = createSandboxRuntime(), concurrency = Number(process.env.KILN_WORKER_CONCURRENCY ?? 2)) {
     this.concurrency = Math.max(1, Math.min(concurrency, 8));
   }
 
@@ -59,13 +59,13 @@ export class ExecutionWorker {
       sandbox = await this.runtime.create(job.sessionId);
       const { data: sandboxRow, error: sandboxError } = await supabaseAdmin
         .from('sandboxes')
-        .insert({ session_id: job.sessionId, provider: 'docker', machine_id: sandbox.machineId, status: 'running' })
+        .insert({ session_id: job.sessionId, provider: sandbox.provider, machine_id: sandbox.machineId, status: 'running' })
         .select('id')
         .single();
       if (sandboxError || !sandboxRow) throw sandboxError ?? new Error('sandbox row was not created');
       const sandboxRecordId = sandboxRow.id as string;
       await supabaseAdmin.from('sessions').update({ sandbox_id: sandboxRecordId, status: 'executing' }).eq('id', job.sessionId).eq('org_id', job.orgId);
-      await events.emit('thought', { role: 'executor', text: 'Isolated Docker workspace is ready.' });
+      await events.emit('thought', { role: 'executor', text: `Isolated ${sandbox.provider} workspace is ready.` });
 
       const context = { sessionId: job.sessionId, sandbox, runtime: this.runtime, events };
       if (job.repo) {

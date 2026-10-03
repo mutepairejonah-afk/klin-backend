@@ -102,7 +102,7 @@ export class DockerSandboxRuntime implements SandboxRuntime {
   async destroy(handle: SandboxHandle): Promise<void> {
     const result = await runDocker(['rm', '-f', handle.machineId], { timeoutMs: 30_000 });
     if (result.exitCode !== 0 && !/No such container/i.test(result.stderr)) throw new Error(`docker sandbox destroy failed: ${result.stderr}`);
-    await runDocker(['volume', 'rm', '-f', handle.volume], { timeoutMs: 30_000 });
+    if (handle.volume) await runDocker(['volume', 'rm', '-f', handle.volume], { timeoutMs: 30_000 });
   }
 
   async exec(handle: SandboxHandle, request: ExecRequest): Promise<ExecResult> {
