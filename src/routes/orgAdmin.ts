@@ -103,16 +103,10 @@ memoryRouter.get('/repos', async (req, res) => {
   res.json((data ?? []).map((r: any) => ({ repo: r.repo, files: r.files, symbols: r.symbols, indexedAt: r.indexed_at, stale: r.stale })));
 });
 
-memoryRouter.post('/repos/reindex', async (req, res) => {
+memoryRouter.post('/repos/reindex', requireOperator, async (req, res) => {
   const { repo } = req.body ?? {};
   if (!repo) return res.status(400).json({ error: 'repo required' });
-  // Stub: enqueue the real re-index job (§11). Marks not-stale immediately
-  // so the UI reflects the request; swap for an actual worker + webhook.
-  const { error } = await req.db!
-    .from('repo_index')
-    .upsert({ org_id: req.orgId, repo, indexed_at: new Date().toISOString(), stale: false }, { onConflict: 'org_id,repo' });
-  if (error) return res.status(500).json({ error: error.message });
-  res.status(204).end();
+  return res.status(501).json({ error: 'repository indexing worker is not configured yet' });
 });
 
 memoryRouter.get('/user', async (req, res) => {
@@ -138,7 +132,7 @@ memoryRouter.get('/org', async (req, res) => {
   res.json(data ?? []);
 });
 
-memoryRouter.post('/org', async (req, res) => {
+memoryRouter.post('/org', requireOperator, async (req, res) => {
   const { text, kind } = req.body ?? {};
   if (!text || !kind) return res.status(400).json({ error: 'text, kind required' });
   const { data, error } = await req.db!.from('org_memory').insert({ org_id: req.orgId, text, kind }).select('id, text, kind').single();

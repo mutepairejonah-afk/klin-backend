@@ -1,0 +1,57 @@
+export type SandboxStatus = 'provisioning' | 'running' | 'idle' | 'paused' | 'destroyed';
+
+export interface ExecRequest {
+  command: string;
+  cwd?: string;
+  timeoutMs?: number;
+  env?: Record<string, string>;
+  onStdout?: (chunk: string) => void;
+  onStderr?: (chunk: string) => void;
+}
+
+export interface ExecResult {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+  timedOut: boolean;
+  durationMs: number;
+}
+
+export interface SandboxHandle {
+  id: string;
+  provider: 'docker';
+  machineId: string;
+  volume: string;
+  workspace: string;
+}
+
+export interface SandboxRuntime {
+  create(sessionId: string): Promise<SandboxHandle>;
+  destroy(handle: SandboxHandle): Promise<void>;
+  exec(handle: SandboxHandle, request: ExecRequest): Promise<ExecResult>;
+}
+
+export interface ToolEventSink {
+  emit(type: string, payload: Record<string, unknown>): Promise<void>;
+}
+
+export interface ToolContext {
+  sessionId: string;
+  sandbox: SandboxHandle;
+  runtime: SandboxRuntime;
+  events: ToolEventSink;
+}
+
+export interface FileEntry {
+  path: string;
+  type: 'file' | 'directory';
+  size?: number;
+}
+
+export interface TestResult {
+  passed: number;
+  failed: number;
+  exitCode: number;
+  timedOut: boolean;
+  report: string;
+}

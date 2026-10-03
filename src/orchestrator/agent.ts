@@ -2,6 +2,8 @@ import { emitEvent } from '../lib/eventBus.js';
 import { supabaseAdmin } from '../lib/supabase.js';
 import { chat, type ChatMessage, type ModelOverride } from '../lib/llm.js';
 import { webSearch, needsResearch } from '../lib/websearch.js';
+import { checkpoint, SessionCancelledError, takeSteeringMessages } from '../lib/sessionControl.js';
+import { buildFollowupMessages } from './conversation.js';
 
 export interface Persona { slug: string; name: string; systemPrompt: string }
 
@@ -21,6 +23,7 @@ export async function runAgent(sessionId: string, goal: string, persona?: Person
     labels.map((label, i) => ({ id: `t${i + 1}`, label, done: i < doneCount }));
 
   try {
+    await checkpoint(sessionId);
     await setStatus('planning');
     if (persona) await emitEvent(sessionId, 'thought', { role: 'planner', text: `Specialist: ${persona.name}` });
 
@@ -29,6 +32,7 @@ export async function runAgent(sessionId: string, goal: string, persona?: Person
     // the terminal/events tab), same as any other tool call would.
     let researchContext = '';
     if (needsResearch(goal)) {
+      await checkpoint(sessionId);
       await emitEvent(sessionId, 'action.started', { role: 'researcher', tool: 'search', verb: 'search', target: goal.slice(0, 80) });
       try {
         const results = await webSearch(goal, 5);
@@ -43,9 +47,12 @@ export async function runAgent(sessionId: string, goal: string, persona?: Person
       }
     }
 
+    await checkpoint(sessionId);
+    const steering = takeSteeringMessages(sessionId);
+
     const msgs: ChatMessage[] = [
       { role: 'system', content: system(persona) },
-      { role: 'user', content: `Goal: ${goal}${researchContext ? `\n\n${researchContext}` : ''}\n\nReply with JSON only: {"steps": ["2 to 5 short imperative steps — keep this to 1-2 steps for a simple chat/research question, more only for an actual multi-part task"]}` },
+      { role: 'user', content: `Goal: ${goal}${researchContext ? `\n\n${researchContext}` : ''}${steering.length ? `\n\nUser steering:\n${steering.join('\n')}` : ''}\n\nReply with JSON only: {"steps": ["2 to 5 short imperative steps — keep this to 1-2 steps for a simple chat/research question, more only for an actual multi-part task"]}` },
     ];
     let steps = ['Answer the question'];
     try {
@@ -56,11 +63,13 @@ export async function runAgent(sessionId: string, goal: string, persona?: Person
     await emitEvent(sessionId, 'plan.updated', { todos: todo(steps, 0) });
 
     await setStatus('executing');
+    await checkpoint(sessionId);
     await emitEvent(sessionId, 'action.started', { role: 'executor', tool: 'model', verb: 'think', target: goal.slice(0, 80) });
+    const finalSteering = takeSteeringMessages(sessionId);
     const answer = await chat(
       [
         { role: 'system', content: system(persona) },
-        { role: 'user', content: `Goal: ${goal}${researchContext ? `\n\n${researchContext}` : ''}\n\nPlan:\n${steps.map((s, i) => `${i + 1}. ${s}`).join('\n')}\n\nCarry out the plan and give the full result.` },
+        { role: 'user', content: `Goal: ${goal}${researchContext ? `\n\n${researchContext}` : ''}\n\nPlan:\n${steps.map((s, i) => `${i + 1}. ${s}`).join('\n')}${finalSteering.length ? `\n\nAdditional user steering:\n${finalSteering.join('\n')}` : ''}\n\nCarry out the plan and give the full result.` },
       ],
       { maxTokens: 3000 },
       modelOverride,
@@ -72,7 +81,65 @@ export async function runAgent(sessionId: string, goal: string, persona?: Person
     await emitEvent(sessionId, 'session.done', { summary: answer.text.slice(0, 280) });
     await setStatus('done', { ended_at: new Date().toISOString(), duration_sec: Math.round((Date.now() - started) / 1000), cost_usd: 0 });
   } catch (err) {
+    if (err instanceof SessionCancelledError) {
+      await emitEvent(sessionId, 'error', { message: 'Session cancelled by user.' });
+      await setStatus('failed', { ended_at: new Date().toISOString() });
+      return;
+    }
     await emitEvent(sessionId, 'error', { message: err instanceof Error ? err.message : String(err) });
     await setStatus('failed', { ended_at: new Date().toISOString() });
+  }
+}
+
+/** Answer a message sent after a text/chat session has finished. */
+export async function runAgentFollowup(
+  sessionId: string,
+  originalGoal: string,
+  currentMessage: string,
+  beforeSeq: number,
+  previousDurationSec: number | null | undefined,
+  modelOverride?: ModelOverride,
+) {
+  const started = Date.now();
+  const setStatus = async (status: string, extra: Record<string, unknown> = {}) => {
+    const { error } = await supabaseAdmin.from('sessions').update({ status, ...extra }).eq('id', sessionId);
+    if (error) throw error;
+  };
+
+  try {
+    const { data: history, error } = await supabaseAdmin
+      .from('events')
+      .select('type,payload')
+      .eq('session_id', sessionId)
+      .lt('seq', beforeSeq)
+      .order('seq', { ascending: true });
+    if (error) throw error;
+
+    await emitEvent(sessionId, 'action.started', {
+      role: 'executor', tool: 'model', verb: 'think', target: currentMessage.slice(0, 80),
+    });
+    const answer = await chat(
+      buildFollowupMessages(
+        `${BASE}\n\nThis is an ongoing conversation. Answer the user's latest message directly using the full conversation context. Do not give a generic greeting or return JSON unless the user asks for JSON.`,
+        originalGoal,
+        (history ?? []) as { type: string; payload: Record<string, unknown> }[],
+        currentMessage,
+      ),
+      { maxTokens: 3000 },
+      modelOverride,
+    );
+
+    await emitEvent(sessionId, 'action.completed', { tool: 'model', result: `${answer.provider} · ${answer.model}` });
+    await emitEvent(sessionId, 'thought', { role: 'executor', text: answer.text });
+    await emitEvent(sessionId, 'session.done', { summary: answer.text.slice(0, 280) });
+    await setStatus('done', {
+      ended_at: new Date().toISOString(),
+      duration_sec: Math.max(0, previousDurationSec ?? 0) + Math.round((Date.now() - started) / 1000),
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    try { await emitEvent(sessionId, 'error', { message }); } catch { /* retain the original failure */ }
+    try { await setStatus('failed', { ended_at: new Date().toISOString() }); } catch { /* retain the original failure */ }
+    console.error('session follow-up failed', { sessionId, error: message });
   }
 }

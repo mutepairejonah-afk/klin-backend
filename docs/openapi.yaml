@@ -3,10 +3,9 @@ info:
   title: klin API (kiln-api)
   version: "1.0.0"
   description: |
-    REST + SSE backend for klin. Auth is a Supabase session cookie set by the
-    OAuth callback below — there is no separate bearer token for the browser client.
-    All routes except `/api/auth/*`, `/api/share/*` and `/healthz` require a
-    signed-in session with org membership (enforced by RLS at the database level).
+    REST + SSE backend for klin. Auth is a Clerk bearer token. All routes except
+    `/api/auth/*`, `/api/share/*`, `/api/docs` and `/healthz` require a signed-in
+    session with org membership; handlers explicitly scope service-role queries.
 servers:
   - url: https://kiln-api-2lhz.onrender.com
     description: Production (Render)
@@ -23,10 +22,9 @@ tags:
   - name: share
 components:
   securitySchemes:
-    sessionCookie:
-      type: apiKey
-      in: cookie
-      name: kiln_session
+    clerkBearer:
+      type: http
+      scheme: bearer
   schemas:
     Session:
       type: object
@@ -99,7 +97,7 @@ components:
       properties:
         error: { type: string }
 security:
-  - sessionCookie: []
+  - clerkBearer: []
 paths:
   /healthz:
     get:
@@ -151,7 +149,7 @@ paths:
               schema: { type: array, items: { $ref: '#/components/schemas/Session' } }
     post:
       summary: Create a session and start the agent
-      description: Runs the real agent (OpenRouter → Gemini → Claude, first configured/available) if any AI provider key is set on the server, otherwise a canned demo.
+      description: Runs the current chat/research agent for plain questions. Repository coding requests are queued into the Docker execution worker only when KILN_EXECUTION_ENABLED=true; otherwise they fail explicitly and never emit simulated edits, tests, or pull requests.
       tags: [sessions]
       requestBody:
         required: true
@@ -209,14 +207,26 @@ paths:
       responses: { '200': { description: OK } }
   /api/sessions/{id}/message:
     post:
-      summary: Send a follow-up message into a running session
+      summary: Send a message to an active session or continue a completed text session
+      description: Active sessions receive steering input. Completed text/chat sessions start a new model turn with the persisted conversation context. Completed repository sessions must be restarted as a new coding session.
       tags: [sessions]
       parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
       requestBody:
         content:
           application/json:
-            schema: { type: object, properties: { text: { type: string } } }
-      responses: { '200': { description: OK } }
+            schema: { type: object, required: [message], properties: { message: { type: string, minLength: 1, maxLength: 20000 } } }
+      responses:
+        '202':
+          description: Accepted for processing
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accepted: { type: boolean }
+        '400': { description: Invalid message }
+        '409': { description: Follow-up already running or repository session requires a new run }
+        '503': { description: No AI provider configured }
   /api/sessions/{id}/approvals/{aid}:
     post:
       summary: Approve or reject a pending approval gate
@@ -347,7 +357,19 @@ paths:
       responses: { '200': { description: OK } }
   /api/sandboxes/{id}/exec:
     post:
-      summary: Execute a command in a session's sandbox (operator role only)
+      summary: Execute a bounded command in a Docker-isolated session sandbox (operator role only, development diagnostics)
+      description: Disabled unless ALLOW_DEV_SANDBOX_EXEC=true. Commands run as uid 1000 inside /workspace with runtime CPU, memory, PID, timeout, and output limits.
       tags: [sandboxes]
       parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
-      responses: { '200': { description: OK }, '403': { description: Requires operator role } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [command]
+              properties:
+                command: { type: string }
+                cwd: { type: string, default: /workspace }
+                timeoutMs: { type: integer, minimum: 1, maximum: 900000, default: 120000 }
+      responses: { '200': { description: OK }, '403': { description: Requires operator role or endpoint disabled }, '422': { description: Command failed } }
