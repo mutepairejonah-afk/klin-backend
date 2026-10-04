@@ -17,6 +17,7 @@ export interface CodingJob {
   repo?: string;
   branch?: string;
   modelOverride?: ModelOverride;
+  memoryContext?: string;
 }
 
 interface QueuedJob { job: CodingJob; resolve: () => void; reject: (error: unknown) => void }
@@ -104,7 +105,7 @@ export class ExecutionWorker {
         }
       }
       await gitStatus(context);
-      const result = await executeCodingTask(job.sessionId, job.orgId, job.goal, sandbox, this.runtime, job.modelOverride, undefined, events, githubContext);
+      const result = await executeCodingTask(job.sessionId, job.orgId, job.goal, sandbox, this.runtime, job.modelOverride, undefined, events, githubContext, job.memoryContext);
       await events.emit('session.done', { summary: result.summary.slice(0, 280) });
       await supabaseAdmin.from('sessions').update({ status: 'done', ended_at: new Date().toISOString() }).eq('id', job.sessionId).eq('org_id', job.orgId);
       await supabaseAdmin.from('sandboxes').update({ status: 'idle', updated_at: new Date().toISOString() }).eq('id', sandboxRecordId);

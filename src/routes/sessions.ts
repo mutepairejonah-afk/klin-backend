@@ -11,6 +11,7 @@ import { cancelSession, forgetSessionControl, pauseSession, resumeSession, steer
 import { requireOperator } from '../middleware/auth.js';
 import { SANDBOX_INTENT } from '../lib/sandboxIntent.js';
 import { executionWorker } from '../worker/executionWorker.js';
+import { loadAgentMemory } from '../lib/agentMemory.js';
 
 const router = Router();
 
@@ -80,15 +81,16 @@ router.post('/', async (req, res) => {
   // Settings -> Model: the person's preferred provider/model, if they set one.
   const { data: settings } = await req.db!.from('user_settings').select('model_routing').eq('org_id', req.orgId).eq('user_id', req.user!.id).maybeSingle();
   const modelOverride = settings?.model_routing?.provider ? { provider: settings.model_routing.provider, model: settings.model_routing.model } : undefined;
+  const memoryContext = await loadAgentMemory(req.orgId!, req.user!.id);
 
   // Never simulate a successful coding run. Until a real execution runtime is
   // configured, fail explicitly rather than emitting fake edits, tests, or PRs.
   const codingRuntimeReady = process.env.KILN_EXECUTION_ENABLED === 'true' && process.env.ORCHESTRATOR_MODE === 'coding';
   const executionRequested = Boolean(input.repo || input.jobId || (codingRuntimeReady && (input.sandbox === true || SANDBOX_INTENT.test(input.goal))));
   const run = executionRequested && codingRuntimeReady
-    ? executionWorker.enqueue({ sessionId: data.id, orgId: req.orgId!, actor: req.user!.email, goal: input.goal, repo: input.repo, branch: input.branch, modelOverride })
+    ? executionWorker.enqueue({ sessionId: data.id, orgId: req.orgId!, actor: req.user!.email, goal: input.goal, repo: input.repo, branch: input.branch, modelOverride, memoryContext })
     : llmConfigured() && !executionRequested
-      ? runAgent(data.id, input.goal, input.agent, modelOverride)
+      ? runAgent(data.id, input.goal, input.agent, modelOverride, memoryContext)
       : runUnavailableOrchestrator(data.id, input.goal);
   Promise.resolve(run)
     .catch((err) => console.error('orchestrator error', err));
@@ -239,6 +241,7 @@ router.post('/:id/message', async (req, res) => {
     const modelOverride = settings?.model_routing?.provider
       ? { provider: settings.model_routing.provider, model: settings.model_routing.model }
       : undefined;
+    const memoryContext = await loadAgentMemory(req.orgId!, req.user!.id);
     void runAgentFollowup(
       req.params.id,
       session.goal,
@@ -246,6 +249,7 @@ router.post('/:id/message', async (req, res) => {
       userEvent.seq,
       session.duration_sec,
       modelOverride,
+      memoryContext,
     );
     return res.status(202).json({ accepted: true });
   } catch (err) {
