@@ -7,6 +7,7 @@ import { claimExecutionJob, heartbeatExecutionJob, markExecutionJob, requeueStal
 const workerId = `${process.env.KILN_WORKER_ID ?? os.hostname()}-${randomUUID().slice(0, 8)}`;
 const pollMs = Math.max(500, Number(process.env.KILN_WORKER_POLL_MS ?? 2_000));
 const staleSeconds = Math.max(60, Number(process.env.KILN_WORKER_STALE_SECONDS ?? 900));
+const leaseSeconds = Math.max(60, Number(process.env.KILN_WORKER_LEASE_SECONDS ?? staleSeconds));
 const executionWorker = new ExecutionWorker(undefined, 1);
 let stopping = false;
 let activeJob: ExecutionJobRow | undefined;
@@ -15,7 +16,7 @@ let heartbeatTimer: NodeJS.Timeout | undefined;
 async function runJob(job: ExecutionJobRow) {
   activeJob = job;
   heartbeatTimer = setInterval(() => {
-    void heartbeatExecutionJob(job.id).catch((error) => console.error('heartbeat failed', error));
+    void heartbeatExecutionJob(job.id, workerId, leaseSeconds).catch((error) => console.error('heartbeat failed', error));
   }, Math.min(30_000, Math.max(5_000, Math.floor(staleSeconds * 1_000 / 3))));
   try {
     await executionWorker.enqueue({
@@ -27,11 +28,11 @@ async function runJob(job: ExecutionJobRow) {
       branch: job.branch ?? undefined,
       modelOverride: job.model_override ?? undefined,
     });
-    await markExecutionJob(job.id, 'succeeded');
+    await markExecutionJob(job.id, workerId, 'succeeded');
     console.log(JSON.stringify({ event: 'job.succeeded', workerId, jobId: job.id, sessionId: job.session_id }));
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    await markExecutionJob(job.id, 'failed', message).catch((markError) => console.error('failed to mark job failed', markError));
+    await markExecutionJob(job.id, workerId, 'failed', message).catch((markError) => console.error('failed to mark job failed', markError));
     console.error(JSON.stringify({ event: 'job.failed', workerId, jobId: job.id, sessionId: job.session_id, error: message }));
   } finally {
     if (heartbeatTimer) clearInterval(heartbeatTimer);
@@ -46,7 +47,7 @@ async function loop() {
     try {
       await requeueStaleJobs(staleSeconds);
       if (!activeJob) {
-        const job = await claimExecutionJob(workerId);
+        const job = await claimExecutionJob(workerId, leaseSeconds);
         if (job) await runJob(job);
       }
     } catch (error) {

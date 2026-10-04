@@ -14,6 +14,9 @@ export interface ExecutionJobRow {
   worker_id?: string | null;
   error?: string | null;
   model_override?: ModelOverride | null;
+  lease_expires_at?: string | null;
+  resource_profile?: { cpus?: number; memory?: string; pidsLimit?: number; network?: string } | null;
+  result?: Record<string, unknown> | null;
 }
 
 export async function enqueueCodingJob(job: CodingJob) {
@@ -30,8 +33,8 @@ export async function enqueueCodingJob(job: CodingJob) {
   return data.id as string;
 }
 
-export async function claimExecutionJob(workerId: string): Promise<ExecutionJobRow | null> {
-  const { data, error } = await supabaseAdmin.rpc('claim_execution_job', { p_worker_id: workerId });
+export async function claimExecutionJob(workerId: string, leaseSeconds = 900): Promise<ExecutionJobRow | null> {
+  const { data, error } = await supabaseAdmin.rpc('claim_execution_job', { p_worker_id: workerId, p_lease_seconds: leaseSeconds });
   if (error) throw error;
   return (Array.isArray(data) && data.length ? data[0] : null) as ExecutionJobRow | null;
 }
@@ -42,17 +45,18 @@ export async function requeueStaleJobs(timeoutSeconds = 900) {
   return Number(data ?? 0);
 }
 
-export async function markExecutionJob(id: string, status: 'succeeded' | 'failed', errorMessage?: string) {
-  const { error } = await supabaseAdmin.from('execution_jobs').update({
-    status, error: errorMessage ?? null, finished_at: new Date().toISOString(),
-    heartbeat_at: new Date().toISOString(), updated_at: new Date().toISOString(),
-  }).eq('id', id);
+export async function markExecutionJob(id: string, workerId: string, status: 'succeeded' | 'failed', errorMessage?: string) {
+  const { data, error } = await supabaseAdmin.rpc('finish_execution_job', {
+    p_job_id: id, p_worker_id: workerId, p_status: status, p_error: errorMessage ?? null, p_result: null,
+  });
   if (error) throw error;
+  if (data !== true) throw new Error(`worker ${workerId} no longer owns execution job ${id}`);
 }
 
-export async function heartbeatExecutionJob(id: string) {
-  const { error } = await supabaseAdmin.from('execution_jobs').update({
-    heartbeat_at: new Date().toISOString(), updated_at: new Date().toISOString(),
-  }).eq('id', id).eq('status', 'running');
+export async function heartbeatExecutionJob(id: string, workerId: string, leaseSeconds = 900) {
+  const { data, error } = await supabaseAdmin.rpc('heartbeat_execution_job', {
+    p_job_id: id, p_worker_id: workerId, p_lease_seconds: leaseSeconds,
+  });
   if (error) throw error;
+  if (data !== true) throw new Error(`worker ${workerId} no longer owns execution job ${id}`);
 }

@@ -68,10 +68,15 @@ in the frontend's `.env`.
 The deployment must apply the core schema plus the numbered integrity,
 approval-scope, and execution-queue migrations in
 `supabase/migrations/0002_event_integrity.sql`, `0003_approval_org_scope.sql`,
-and `0004_execution_jobs.sql`. These add the unique `(session_id, seq)` event
-invariant, approval organization scope, and atomic worker job claiming. Keep the
+`0004_execution_jobs.sql`, and `0005_execution_compute_config.sql`. These add
+the unique `(session_id, seq)` event invariant, approval organization scope,
+atomic worker job claiming, and heavy-compute lease/resource policy. Keep the
 database schema versioned alongside this service; do not rely on an invisible
 dashboard-only migration.
+
+See [`docs/SUPABASE_COMPUTE.md`](docs/SUPABASE_COMPUTE.md) for the Supabase
+control-plane configuration. Supabase stores and coordinates heavy jobs; the
+Docker/OpenSandbox worker performs the actual CPU- and memory-intensive work.
 
 To apply it to a different Supabase project, run `supabase/migrations/` followed
 by `auto_provision_org_on_signup` (see the file's own comments) through the
