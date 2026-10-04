@@ -59,6 +59,7 @@ components:
         repo: { type: string }
         branch: { type: string }
         connectors: { type: array, items: { type: string } }
+        sandbox: { type: boolean, description: Force isolated execution without a selected job or repository }
         agent: { $ref: '#/components/schemas/AgentPersona' }
     SessionEvent:
       type: object
@@ -149,7 +150,7 @@ paths:
               schema: { type: array, items: { $ref: '#/components/schemas/Session' } }
     post:
       summary: Create a session and start the agent
-      description: Runs the current chat/research agent for plain questions. Repository coding requests are queued into the Docker execution worker only when KILN_EXECUTION_ENABLED=true; otherwise they fail explicitly and never emit simulated edits, tests, or pull requests.
+      description: Plain questions use the chat/research agent. Code-creation, editing, and execution requests are routed to the isolated worker even without a jobId or repository when the runtime is enabled; otherwise they fail explicitly instead of returning a text-only answer that implies code was run.
       tags: [sessions]
       requestBody:
         required: true
@@ -207,8 +208,8 @@ paths:
       responses: { '200': { description: OK } }
   /api/sessions/{id}/message:
     post:
-      summary: Send a message to an active session or continue a completed text session
-      description: Active sessions receive steering input. Completed text/chat sessions start a new model turn with the persisted conversation context. Completed repository sessions must be restarted as a new coding session.
+      summary: Send a message to an active session or continue a completed session
+      description: Active sessions receive steering input. Completed plain-chat sessions start a model turn with persisted conversation context; code requests on completed jobless sessions run in a sandbox restored from persisted workspace files. Completed repository sessions must be restarted as a new coding session.
       tags: [sessions]
       parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
       requestBody:
@@ -226,7 +227,7 @@ paths:
                   accepted: { type: boolean }
         '400': { description: Invalid message }
         '409': { description: Follow-up already running or repository session requires a new run }
-        '503': { description: No AI provider configured }
+        '503': { description: No AI provider or sandbox runtime configured }
   /api/sessions/{id}/approvals/{aid}:
     post:
       summary: Approve or reject a pending approval gate

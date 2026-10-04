@@ -4,8 +4,9 @@ import { decrypt } from '../lib/crypto.js';
 import { checkpoint, forgetSessionControl, sessionSignal, SessionCancelledError } from '../lib/sessionControl.js';
 import { emitEvent } from '../lib/eventBus.js';
 import { createSandboxRuntime } from '../sandbox/index.js';
-import { GitHubExecutionContext, SandboxHandle, SandboxRuntime } from '../sandbox/types.js';
-import { eventSink, gitClone, gitBranch, gitStatus } from '../tools/sandboxTools.js';
+import { GitHubExecutionContext, SandboxHandle, SandboxRuntime, ToolContext } from '../sandbox/types.js';
+import { reconstructWorkspaceFiles } from '../sandbox/workspaceSnapshot.js';
+import { eventSink, gitClone, gitBranch, gitStatus, writeFile } from '../tools/sandboxTools.js';
 import { executeCodingTask } from '../orchestrator/executor.js';
 import type { ModelOverride } from '../lib/llm.js';
 
@@ -17,6 +18,7 @@ export interface CodingJob {
   repo?: string;
   branch?: string;
   modelOverride?: ModelOverride;
+  agent?: { slug: string; name: string; systemPrompt: string };
 }
 
 interface QueuedJob { job: CodingJob; resolve: () => void; reject: (error: unknown) => void }
@@ -102,9 +104,11 @@ export class ExecutionWorker {
           await gitBranch(context, workBranch);
           githubContext = { repository: githubRepo.fullName, baseBranch, workBranch, ...credentials };
         }
+      } else {
+        await restoreWorkspaceFiles(job.sessionId, context);
       }
       await gitStatus(context);
-      const result = await executeCodingTask(job.sessionId, job.orgId, job.goal, sandbox, this.runtime, job.modelOverride, undefined, events, githubContext);
+      const result = await executeCodingTask(job.sessionId, job.orgId, job.goal, sandbox, this.runtime, job.modelOverride, undefined, events, githubContext, job.agent);
       await events.emit('session.done', { summary: result.summary.slice(0, 280) });
       await supabaseAdmin.from('sessions').update({ status: 'done', ended_at: new Date().toISOString() }).eq('id', job.sessionId).eq('org_id', job.orgId);
       await supabaseAdmin.from('sandboxes').update({ status: 'idle', updated_at: new Date().toISOString() }).eq('id', sandboxRecordId);
@@ -124,6 +128,28 @@ export class ExecutionWorker {
       this.activeSessions.delete(job.sessionId);
       forgetSessionControl(job.sessionId);
     }
+  }
+}
+
+async function restoreWorkspaceFiles(sessionId: string, context: ToolContext) {
+  const { data, error } = await supabaseAdmin
+    .from('events')
+    .select('type,payload')
+    .eq('session_id', sessionId)
+    .in('type', ['file.created', 'file.modified', 'file.deleted'])
+    .order('seq', { ascending: true })
+    .limit(101);
+  if (error) throw error;
+  if ((data ?? []).length > 100) throw new Error('Too many prior file changes to restore safely; start a new coding session.');
+
+  const files = reconstructWorkspaceFiles(data ?? []);
+  if (files.length > 100) throw new Error('Too many prior workspace files to restore safely; start a new coding session.');
+
+  let totalBytes = 0;
+  for (const { path, content } of files) {
+    totalBytes += Buffer.byteLength(content, 'utf8');
+    if (totalBytes > 10 * 1024 * 1024) throw new Error('Prior workspace snapshot exceeds the 10 MiB restore limit.');
+    await writeFile(context, path, content, { emitEvents: false });
   }
 }
 
