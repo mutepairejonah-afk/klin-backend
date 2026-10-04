@@ -48,16 +48,19 @@ export async function readFile(context: ToolContext, path: string) {
   return { path, content: content.join('\n') };
 }
 
-export async function writeFile(context: ToolContext, path: string, content: string) {
+export async function writeFile(context: ToolContext, path: string, content: string, options: { emitEvents?: boolean } = {}) {
   if (Buffer.byteLength(content, 'utf8') > MAX_FILE_BYTES) throw new Error(`file exceeds ${MAX_FILE_BYTES} byte limit`);
   const target = workspacePath(path);
   const encoded = Buffer.from(content, 'utf8').toString('base64');
-  await context.events.emit('action.started', { role: 'executor', tool: 'editor', verb: 'write', target: path });
+  const emitEvents = options.emitEvents !== false;
+  if (emitEvents) await context.events.emit('action.started', { role: 'executor', tool: 'editor', verb: 'write', target: path });
   const existed = (await exec(context, `test -e ${shellQuote(target)}`, '/workspace', 10_000)).exitCode === 0;
   const result = await exec(context, `mkdir -p "$(dirname ${shellQuote(target)})" && printf %s ${shellQuote(encoded)} | base64 -d > ${shellQuote(target)}`, '/workspace', 30_000);
   if (result.exitCode !== 0) throw new Error(result.stderr || 'write failed');
-  await context.events.emit(existed ? 'file.modified' : 'file.created', { path, content });
-  await context.events.emit('action.completed', { tool: 'editor', result: `${Buffer.byteLength(content, 'utf8')} bytes` });
+  if (emitEvents) {
+    await context.events.emit(existed ? 'file.modified' : 'file.created', { path, content });
+    await context.events.emit('action.completed', { tool: 'editor', result: `${Buffer.byteLength(content, 'utf8')} bytes` });
+  }
   return { path, bytes: Buffer.byteLength(content, 'utf8'), created: !existed };
 }
 

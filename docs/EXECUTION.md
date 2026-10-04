@@ -69,8 +69,10 @@ code.
 
 ## Worker lifecycle
 
-1. `POST /sessions` queues a coding job only when `KILN_EXECUTION_ENABLED=true`
-   and `ORCHESTRATOR_MODE=coding`; otherwise the backend fails honestly.
+1. `POST /sessions` routes explicit code/build/test requests to the sandbox
+   worker whether or not `jobId` or `repo` is present. Plain chat stays on the
+   text agent. Sandbox requests require `KILN_EXECUTION_ENABLED=true` and
+   `ORCHESTRATOR_MODE=coding`; if those are off, the backend fails honestly.
 2. The worker creates the container and volume, records `sandboxes`, and links
    `sessions.sandbox_id`.
 3. It clones the requested HTTPS repository, checks out the requested branch,

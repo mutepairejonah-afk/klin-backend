@@ -21,12 +21,13 @@ Postgres database.
 
 ## Execution plane
 
-The backend now includes a Docker-isolated execution baseline. Coding sessions
-are handled by a bounded `ExecutionWorker`, which provisions one non-root
-container and workspace volume per session and exposes filesystem, shell, Git,
-and test tools through `src/tools/sandboxTools.ts`. The worker is disabled by
-default; enable it only on a host with Docker and a pinned image using the
-`KILN_EXECUTION_*` settings in `.env.example`.
+The backend includes an isolated execution worker with filesystem, shell, Git,
+and test tools through `src/tools/sandboxTools.ts`. Direct code/build/test
+requests are routed to it even when no job template or repository was selected;
+plain questions stay on the chat path. If the runtime is disabled, coding
+requests fail explicitly rather than receiving a text-only answer that implies
+code was run. Enable it only on a host with a configured sandbox provider using
+the execution settings in `.env.example`.
 
 See [`docs/EXECUTION.md`](docs/EXECUTION.md) for the isolation model, threat
 boundaries, lifecycle, and OpenSandbox replacement seam. The current queue is
@@ -155,7 +156,7 @@ To wire up GitHub: create a GitHub OAuth App (github.com/settings/developers), c
 
 ## Research (no terminal needed)
 
-Plain chat and research questions no longer pretend to need a sandbox/terminal — see the agent's
+Plain chat and research questions do not need a sandbox/terminal — see the agent's
 system prompt in `src/orchestrator/agent.ts`. A lightweight heuristic (`needsResearch` in
 `src/lib/websearch.ts`) triggers a real, keyless web search (DuckDuckGo HTML) when a goal looks
 like it needs current/factual info, and the results are fed into the model's answer. It's a free
@@ -165,7 +166,7 @@ scrape, not a paid search API — swap it out if quality matters more than cost.
 
 `Settings -> Model` lets a person pick a specific provider/model; it's stored in
 `user_settings.model_routing` as `{ provider, model }` and read by `POST /sessions`, which passes
-it to `runAgent` as a `ModelOverride`. The chosen provider is tried first; everything still falls
+it to the chat agent or sandbox executor as a `ModelOverride`. The chosen provider is tried first; everything still falls
 back through the other configured providers on failure, so picking "Ollama" doesn't break a
 session if Ollama is briefly down. `GET /models` tells the frontend which providers actually have
 a key set on the server, so the picker doesn't offer a dead option.

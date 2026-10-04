@@ -136,10 +136,14 @@ export async function executeCodingTask(
   chatFn: ChatFn = chat,
   eventsOverride?: ToolEventSink,
   github?: GitHubExecutionContext,
+  persona?: { slug: string; name: string; systemPrompt: string },
 ): Promise<ExecutorResult> {
   const context: ToolContext = { sessionId, sandbox, runtime, events: eventsOverride ?? eventSink(sessionId), github };
+  const executorInstructions = persona?.systemPrompt.trim()
+    ? `${EXECUTOR_SYSTEM}\n\nSpecialist instructions (${persona.name}):\n${persona.systemPrompt.slice(0, 24_000)}`
+    : EXECUTOR_SYSTEM;
   const messages: ChatMessage[] = [
-    { role: 'system', content: EXECUTOR_SYSTEM },
+    { role: 'system', content: executorInstructions },
     { role: 'user', content: `User goal:\n${goal}\n\n${github ? `GitHub repository: ${github.repository}\nBase branch: ${github.baseBranch}\nWork branch: ${github.workBranch}\nAfter tests, prepare a feature-branch commit, push, and pull request. Each write action requires its own approval; never merge.` : ''}\nStart by inspecting the repository and then make the smallest correct change. Return one JSON action.` },
   ];
   let changed = false;

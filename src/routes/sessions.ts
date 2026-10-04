@@ -9,7 +9,7 @@ import { llmConfigured } from '../lib/llm.js';
 import { appendAudit } from '../lib/audit.js';
 import { cancelSession, forgetSessionControl, pauseSession, resumeSession, steerSession } from '../lib/sessionControl.js';
 import { requireOperator } from '../middleware/auth.js';
-import { SANDBOX_INTENT } from '../lib/sandboxIntent.js';
+import { resolveSessionExecutionMode } from '../lib/sandboxIntent.js';
 import { executionWorker } from '../worker/executionWorker.js';
 
 const router = Router();
@@ -81,13 +81,14 @@ router.post('/', async (req, res) => {
   const { data: settings } = await req.db!.from('user_settings').select('model_routing').eq('org_id', req.orgId).eq('user_id', req.user!.id).maybeSingle();
   const modelOverride = settings?.model_routing?.provider ? { provider: settings.model_routing.provider, model: settings.model_routing.model } : undefined;
 
-  // Never simulate a successful coding run. Until a real execution runtime is
-  // configured, fail explicitly rather than emitting fake edits, tests, or PRs.
+  // Coding requests enter the isolated worker even when there is no selected
+  // job template or repository. If execution is disabled, fail honestly rather
+  // than returning a text-only answer that implies code was run.
   const codingRuntimeReady = process.env.KILN_EXECUTION_ENABLED === 'true' && process.env.ORCHESTRATOR_MODE === 'coding';
-  const executionRequested = Boolean(input.repo || input.jobId || (codingRuntimeReady && (input.sandbox === true || SANDBOX_INTENT.test(input.goal))));
-  const run = executionRequested && codingRuntimeReady
-    ? executionWorker.enqueue({ sessionId: data.id, orgId: req.orgId!, actor: req.user!.email, goal: input.goal, repo: input.repo, branch: input.branch, modelOverride })
-    : llmConfigured() && !executionRequested
+  const executionMode = resolveSessionExecutionMode(input, codingRuntimeReady);
+  const run = executionMode === 'sandbox'
+    ? executionWorker.enqueue({ sessionId: data.id, orgId: req.orgId!, actor: req.user!.email, goal: input.goal, repo: input.repo, branch: input.branch, modelOverride, agent: input.agent })
+    : executionMode === 'chat' && llmConfigured()
       ? runAgent(data.id, input.goal, input.agent, modelOverride)
       : runUnavailableOrchestrator(data.id, input.goal);
   Promise.resolve(run)
@@ -223,6 +224,11 @@ router.post('/:id/message', async (req, res) => {
   if (session.repo || session.job_id) {
     return res.status(409).json({ error: 'Start a new coding session to continue repository work.' });
   }
+  const codingRuntimeReady = process.env.KILN_EXECUTION_ENABLED === 'true' && process.env.ORCHESTRATOR_MODE === 'coding';
+  const followupMode = resolveSessionExecutionMode({ goal: message }, codingRuntimeReady);
+  if (followupMode === 'unavailable') {
+    return res.status(503).json({ error: 'Sandbox execution is not configured on this server.' });
+  }
   if (!llmConfigured()) return res.status(503).json({ error: 'No AI provider is configured.' });
 
   const { data: claimed, error: claimError } = await req.db!.from('sessions')
@@ -239,14 +245,25 @@ router.post('/:id/message', async (req, res) => {
     const modelOverride = settings?.model_routing?.provider
       ? { provider: settings.model_routing.provider, model: settings.model_routing.model }
       : undefined;
-    void runAgentFollowup(
-      req.params.id,
-      session.goal,
-      message,
-      userEvent.seq,
-      session.duration_sec,
-      modelOverride,
-    );
+    if (followupMode === 'sandbox') {
+      const goal = `Continue the previous session.\n\nOriginal request:\n${session.goal}\n\nLatest user request:\n${message}\n\nContinue from any files restored from the previous workspace; if there are no files, create the requested work in the sandbox.`;
+      void executionWorker.enqueue({
+        sessionId: req.params.id,
+        orgId: req.orgId!,
+        actor: req.user!.email,
+        goal,
+        modelOverride,
+      }).catch((err) => console.error('sandbox follow-up error', err));
+    } else {
+      void runAgentFollowup(
+        req.params.id,
+        session.goal,
+        message,
+        userEvent.seq,
+        session.duration_sec,
+        modelOverride,
+      );
+    }
     return res.status(202).json({ accepted: true });
   } catch (err) {
     await req.db!.from('sessions').update({ status: session.status }).eq('id', req.params.id).eq('org_id', req.orgId);

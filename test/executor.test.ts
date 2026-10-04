@@ -40,3 +40,19 @@ test('executor loops through tool calls and requires verification after edits', 
   assert.ok(events.some(([type]) => type === 'file.created' || type === 'file.modified'));
   assert.ok(events.some(([type]) => type === 'test.result'));
 });
+
+test('executor preserves the selected specialist prompt when using the sandbox path', async () => {
+  const runtime = new FakeRuntime();
+  let systemPrompt = '';
+  const chatFn = async (messages: ChatMessage[]) => {
+    systemPrompt = messages[0].content;
+    return { text: '{"action":"finish","summary":"Done."}', provider: 'openrouter' as const, model: 'fake' };
+  };
+  const sink: ToolEventSink = { emit: async () => undefined };
+  await executeCodingTask(
+    'session-2', 'org-1', 'Create a website', sandbox, runtime, undefined, chatFn, sink, undefined,
+    { slug: 'frontend', name: 'Frontend Specialist', systemPrompt: 'Prefer accessible React components.' },
+  );
+  assert.match(systemPrompt, /Frontend Specialist/);
+  assert.match(systemPrompt, /accessible React components/);
+});

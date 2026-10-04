@@ -41,6 +41,9 @@ test('filesystem tools reject traversal and write within workspace', async () =>
   const written = await writeFile(ctx, 'src/a.txt', 'hello');
   assert.equal(written.bytes, 5);
   assert.ok(events.some(([type]) => type === 'file.created'));
+  const eventCount = events.length;
+  await writeFile(ctx, 'src/restore.txt', 'snapshot', { emitEvents: false });
+  assert.equal(events.length, eventCount);
 });
 
 test('shell and git tools reject unsafe branch/test commands', async () => {
