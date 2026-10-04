@@ -2,6 +2,8 @@ import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
+import helmet from 'helmet';
+import rateLimit from 'express-rate-limit';
 
 import { requireAuth } from './middleware/auth.js';
 import { attachClerkAuth } from './middleware/clerkAuth.js';
@@ -23,10 +25,23 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const app = express();
 
+app.set('trust proxy', 1);
+app.use(helmet({ contentSecurityPolicy: false, crossOriginResourcePolicy: { policy: 'cross-origin' } }));
 app.use(cors({ origin: process.env.CORS_ORIGIN ?? 'http://localhost:5173', credentials: true }));
-app.use(express.json());
+app.use(express.json({ limit: '1mb' }));
 app.use(cookieParser());
 app.use(attachClerkAuth); // populates req.user/db/orgId/role from a Clerk Bearer token
+
+const configuredRateLimit = Number(process.env.API_RATE_LIMIT ?? 300);
+const apiRateLimit = Number.isFinite(configuredRateLimit) && configuredRateLimit >= 1 ? Math.floor(configuredRateLimit) : 300;
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: apiRateLimit,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  message: { error: 'Too many requests. Please try again later.' },
+});
+app.use('/api', apiLimiter);
 
 // Auth routes are mounted before requireAuth — /auth/me, OAuth start/callback,
 // and signout must all work while logged out.

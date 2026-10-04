@@ -29,7 +29,7 @@ router.get('/:token/replay', async (req, res) => {
   if (!session) return res.status(404).json({ error: 'not found' });
 
   const { data, error } = await supabaseAdmin
-    .from('events').select('seq, ts, type, payload').eq('session_id', session.id).order('seq', { ascending: true });
+    .from('events').select('seq, ts, type, payload').eq('session_id', session.id).order('seq', { ascending: true }).limit(10_000);
   if (error) return res.status(500).json({ error: error.message });
   res.json(data ?? []);
 });

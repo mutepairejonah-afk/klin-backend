@@ -2,7 +2,16 @@ import type { NextFunction, Request, Response } from 'express';
 import { createClerkClient, verifyToken } from '@clerk/backend';
 import { supabaseAdmin } from '../lib/supabase.js';
 
-const clerk = createClerkClient({ secretKey: process.env.CLERK_SECRET_KEY });
+export const clerk = createClerkClient({ secretKey: process.env.CLERK_SECRET_KEY });
+
+export async function getClerkProfile(clerkUserId: string) {
+  const cu = await clerk.users.getUser(clerkUserId);
+  return {
+    email: cu.emailAddresses.find((e) => e.id === cu.primaryEmailAddressId)?.emailAddress ?? cu.emailAddresses[0]?.emailAddress ?? '',
+    name: [cu.firstName, cu.lastName].filter(Boolean).join(' ') || cu.username || '',
+    avatarUrl: cu.imageUrl,
+  };
+}
 
 declare global {
   // eslint-disable-next-line @typescript-eslint/no-namespace
@@ -50,13 +59,10 @@ export async function attachClerkAuth(req: Request, _res: Response, next: NextFu
     profile = { email: cached.email ?? '', name: cached.name ?? '' };
   } else {
     try {
-      const cu = await clerk.users.getUser(clerkUserId);
-      profile = {
-        email: cu.emailAddresses.find((e) => e.id === cu.primaryEmailAddressId)?.emailAddress ?? cu.emailAddresses[0]?.emailAddress ?? '',
-        name: [cu.firstName, cu.lastName].filter(Boolean).join(' ') || cu.username || '',
-      };
+      const current = await getClerkProfile(clerkUserId);
+      profile = { email: current.email, name: current.name };
       await supabaseAdmin.from('clerk_users').upsert({
-        id: clerkUserId, email: profile.email, name: profile.name, avatar_url: cu.imageUrl, updated_at: new Date().toISOString(),
+        id: clerkUserId, email: profile.email, name: profile.name, avatar_url: current.avatarUrl, updated_at: new Date().toISOString(),
       });
     } catch (e) {
       console.error('clerk profile fetch failed', e);
@@ -69,6 +75,22 @@ export async function attachClerkAuth(req: Request, _res: Response, next: NextFu
   let { data: membership } = await supabaseAdmin
     .from('members').select('org_id, role').eq('user_id', clerkUserId)
     .order('created_at', { ascending: true }).limit(1).maybeSingle();
+
+  if (!membership && profile.email) {
+    const { data: pending } = await supabaseAdmin
+      .from('org_invitations').select('id, org_id, role')
+      .eq('email', profile.email.toLowerCase()).eq('status', 'pending')
+      .order('created_at', { ascending: true }).limit(1).maybeSingle();
+    if (pending) {
+      const { data: accepted } = await supabaseAdmin.from('members')
+        .insert({ org_id: pending.org_id, user_id: clerkUserId, role: pending.role })
+        .select('org_id, role').single();
+      if (accepted) {
+        await supabaseAdmin.from('org_invitations').update({ status: 'accepted', accepted_at: new Date().toISOString() }).eq('id', pending.id);
+        membership = accepted;
+      }
+    }
+  }
 
   if (!membership) {
     // First sign-in: provision an org, same shape as the old auto-provision trigger.

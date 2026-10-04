@@ -68,9 +68,11 @@ in the frontend's `.env`.
 The deployment must apply the core schema plus the numbered integrity,
 approval-scope, and execution-queue migrations in
 `supabase/migrations/0002_event_integrity.sql`, `0003_approval_org_scope.sql`,
-`0004_execution_jobs.sql`, and `0005_execution_compute_config.sql`. These add
+`0004_execution_jobs.sql`, `0005_execution_compute_config.sql`, and
+`0006_clerk_invitations.sql`. These add
 the unique `(session_id, seq)` event invariant, approval organization scope,
-atomic worker job claiming, and heavy-compute lease/resource policy. Keep the
+atomic worker job claiming, heavy-compute lease/resource policy, and Clerk
+pending-invitation handoff. Keep the
 database schema versioned alongside this service; do not rely on an invisible
 dashboard-only migration.
 

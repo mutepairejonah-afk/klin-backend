@@ -1,5 +1,7 @@
 import { Router } from 'express';
+import { z } from 'zod';
 import { requireOperator } from '../middleware/auth.js';
+import { clerk, getClerkProfile } from '../middleware/clerkAuth.js';
 
 export const settingsRouter = Router();
 
@@ -47,20 +49,22 @@ settingsRouter.patch('/', async (req, res) => {
 });
 
 export const membersRouter = Router();
+const memberInput = z.object({
+  email: z.string().trim().email().max(320),
+  role: z.enum(['owner', 'operator', 'viewer']),
+});
 
 membersRouter.get('/', async (req, res) => {
   const { data, error } = await req.db!.from('members').select('id, user_id, role').eq('org_id', req.orgId);
   if (error) return res.status(500).json({ error: error.message });
 
-  // members table only has user_id/role; join display name/email from auth
-  // via the admin API (service role) since RLS-scoped clients can't read auth.users.
-  const { supabaseAdmin } = await import('../lib/supabase.js');
   const rows = await Promise.all((data ?? []).map(async (m: any) => {
-    const { data: u } = await supabaseAdmin.auth.admin.getUserById(m.user_id);
+    let profile = { name: 'Unknown', email: '' };
+    try { profile = await getClerkProfile(m.user_id); } catch { /* stale member; keep a safe placeholder */ }
     return {
       id: m.id, role: m.role,
-      name: (u?.user?.user_metadata?.name as string) ?? u?.user?.email ?? 'Unknown',
-      email: u?.user?.email ?? '',
+      name: profile.name || profile.email || 'Unknown',
+      email: profile.email,
     };
   }));
   res.json(rows);
@@ -68,31 +72,42 @@ membersRouter.get('/', async (req, res) => {
 
 // POST /members — invite. Requires operator/owner.
 membersRouter.post('/', requireOperator, async (req, res) => {
-  const { email, role } = req.body ?? {};
-  if (!email || !role) return res.status(400).json({ error: 'email, role required' });
+  const parsed = memberInput.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: 'email must be valid and role must be owner, operator, or viewer' });
+  const { email, role } = parsed.data;
+  if (role === 'owner' && req.role !== 'owner') return res.status(403).json({ error: 'only an owner can assign the owner role' });
 
-  const { supabaseAdmin } = await import('../lib/supabase.js');
-  const { data: invite, error: inviteErr } = await supabaseAdmin.auth.admin.inviteUserByEmail(email);
-  if (inviteErr || !invite?.user) return res.status(500).json({ error: inviteErr?.message ?? 'invite failed' });
-
-  const { data, error } = await req.db!
-    .from('members')
-    .insert({ org_id: req.orgId, user_id: invite.user.id, role })
-    .select('id, role')
-    .single();
-  if (error) return res.status(500).json({ error: error.message });
-  res.status(201).json({ id: data.id, name: email, email, role: data.role });
+  let invitation;
+  try {
+    invitation = await clerk.invitations.createInvitation({
+      emailAddress: email.toLowerCase(),
+      publicMetadata: { kilnOrgId: req.orgId, kilnRole: role },
+      redirectUrl: process.env.FRONTEND_URL ?? 'http://localhost:5173',
+    });
+  } catch (error) {
+    return res.status(502).json({ error: error instanceof Error ? error.message : 'Clerk invitation failed' });
+  }
+  const { data, error } = await req.db!.from('org_invitations').insert({
+    org_id: req.orgId, clerk_invitation_id: invitation.id, email: email.toLowerCase(), role,
+  }).select('id, role').single();
+  if (error) {
+    await clerk.invitations.revokeInvitation(invitation.id).catch(() => {});
+    return res.status(500).json({ error: error.message });
+  }
+  res.status(201).json({ id: data.id, name: email, email, role: data.role, status: 'pending' });
 });
 
 membersRouter.patch('/:id', requireOperator, async (req, res) => {
-  const { role } = req.body ?? {};
-  if (!role) return res.status(400).json({ error: 'role required' });
+  const parsed = z.object({ role: z.enum(['owner', 'operator', 'viewer']) }).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: 'role must be owner, operator, or viewer' });
+  const { role } = parsed.data;
+  if (role === 'owner' && req.role !== 'owner') return res.status(403).json({ error: 'only an owner can assign the owner role' });
   const { data, error } = await req.db!.from('members').update({ role }).eq('id', req.params.id).eq('org_id', req.orgId).select('id, user_id, role').single();
   if (error) return res.status(500).json({ error: error.message });
 
-  const { supabaseAdmin } = await import('../lib/supabase.js');
-  const { data: u } = await supabaseAdmin.auth.admin.getUserById(data.user_id);
-  res.json({ id: data.id, role: data.role, name: (u?.user?.user_metadata?.name as string) ?? u?.user?.email ?? '', email: u?.user?.email ?? '' });
+  let profile = { name: '', email: '' };
+  try { profile = await getClerkProfile(data.user_id); } catch { /* keep a safe empty profile */ }
+  res.json({ id: data.id, role: data.role, name: profile.name || profile.email, email: profile.email });
 });
 
 export const memoryRouter = Router();

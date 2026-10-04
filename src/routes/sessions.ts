@@ -33,7 +33,7 @@ function toSessionDTO(row: any) {
 
 // GET /sessions?status=&repo=
 router.get('/', async (req, res) => {
-  let q = req.db!.from('sessions').select('*').eq('org_id', req.orgId).order('created_at', { ascending: false });
+  let q = req.db!.from('sessions').select('*').eq('org_id', req.orgId).order('created_at', { ascending: false }).limit(200);
   if (req.query.status) q = q.eq('status', req.query.status as string);
   if (req.query.repo) q = q.eq('repo', req.query.repo as string);
   const { data, error } = await q;
@@ -42,12 +42,12 @@ router.get('/', async (req, res) => {
 });
 
 const createSchema = z.object({
-  goal: z.string().min(1),
-  jobId: z.string().nullish(),
-  repo: z.string().optional(),
-  branch: z.string().optional(),
-  connectors: z.array(z.string()).optional(),
-  agent: z.object({ slug: z.string(), name: z.string(), systemPrompt: z.string().max(60_000) }).optional(),
+  goal: z.string().trim().min(1).max(20_000),
+  jobId: z.string().trim().max(200).nullish(),
+  repo: z.string().trim().max(300).optional(),
+  branch: z.string().trim().max(200).optional(),
+  connectors: z.array(z.string().trim().max(100)).max(20).optional(),
+  agent: z.object({ slug: z.string().trim().max(120), name: z.string().trim().max(200), systemPrompt: z.string().max(60_000) }).optional(),
 });
 
 // POST /sessions
@@ -133,11 +133,14 @@ router.get('/:id/events', async (req, res) => {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
     Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
   });
   res.write(': connected\n\n');
 
   subscribe(req.params.id, res);
-  const keepAlive = setInterval(() => res.write(': ping\n\n'), 25000);
+  const keepAlive = setInterval(() => {
+    if (!res.writableEnded) res.write(': ping\n\n');
+  }, 25000);
 
   req.on('close', () => {
     clearInterval(keepAlive);
@@ -150,7 +153,7 @@ router.get('/:id/replay', async (req, res) => {
   const { data: session } = await req.db!.from('sessions').select('id').eq('id', req.params.id).eq('org_id', req.orgId).maybeSingle();
   if (!session) return res.status(404).json({ error: 'not found' });
 
-  const { data, error } = await req.db!.from('events').select('seq, ts, type, payload').eq('session_id', req.params.id).order('seq', { ascending: true });
+  const { data, error } = await req.db!.from('events').select('seq, ts, type, payload').eq('session_id', req.params.id).order('seq', { ascending: true }).limit(10_000);
   if (error) return res.status(500).json({ error: error.message });
   res.json(data ?? []);
 });

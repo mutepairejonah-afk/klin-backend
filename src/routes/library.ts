@@ -22,7 +22,9 @@ usageRouter.get('/', async (req, res) => {
   const { data: sessions, error } = await req.db!
     .from('sessions')
     .select('id, goal, status, cost_usd, duration_sec, created_at, ended_at')
-    .eq('org_id', orgId);
+    .eq('org_id', orgId)
+    .order('created_at', { ascending: false })
+    .limit(5_000);
   if (error) return res.status(500).json({ error: error.message });
 
   const rows = sessions ?? [];
@@ -38,7 +40,8 @@ usageRouter.get('/', async (req, res) => {
 
   const { count: approvalCount } = await req.db!
     .from('approvals')
-    .select('id', { count: 'exact', head: true });
+    .select('id', { count: 'exact', head: true })
+    .eq('org_id', orgId);
 
   const durations = done.map((s: any) => s.duration_sec).filter((n: number | null) => n != null).sort((a: number, b: number) => a - b);
   const median = durations.length ? durations[Math.floor(durations.length / 2)] : undefined;

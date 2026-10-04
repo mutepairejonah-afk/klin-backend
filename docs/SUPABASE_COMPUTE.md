@@ -14,6 +14,7 @@ Apply migrations in order, including:
 0003_approval_org_scope.sql
 0004_execution_jobs.sql
 0005_execution_compute_config.sql
+0006_clerk_invitations.sql
 ```
 
 Using the Supabase CLI:
@@ -33,6 +34,11 @@ Or run the migration SQL in the Supabase SQL Editor. Verify the following exist:
 
 Only the `service_role` can execute the worker RPCs. Never put the service-role
 key in the browser or in a sandbox container.
+
+`0006_clerk_invitations.sql` stores pending Clerk invitations. When an invited
+user signs in for the first time, the Clerk-verified middleware matches the
+lowercase email and creates the organization membership. This avoids calling
+Supabase Auth APIs in a Clerk-authenticated deployment.
 
 ## Queue policy
 
