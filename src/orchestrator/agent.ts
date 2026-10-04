@@ -9,13 +9,13 @@ export interface Persona { slug: string; name: string; systemPrompt: string }
 
 const BASE = `You are klin, an AI assistant for chat, research, and software work. For plain conversation or research questions, just answer directly and conversationally — you do not need a terminal, sandbox, or repository access for that, and should never pretend to open one for a normal question. When web search results are included below, ground your answer in them and mention the source by name; if none are included, answer from what you know and say so if you're unsure or the topic is time-sensitive. You cannot yet execute code, run shell commands, or push changes to a live sandbox/repository — for tasks that genuinely need that, say so plainly and give the exact code, diff, or commands the person can run themselves instead of claiming to have run them.`;
 
-function system(persona?: Persona) {
-  if (!persona) return BASE;
+function system(persona?: Persona, memoryContext?: string) {
+  if (!persona) return memoryContext ? `${BASE}\n\n${memoryContext}` : BASE;
   // Persona prompts are long; cap so free-tier context windows aren't blown.
-  return `${BASE}\n\nAdopt this specialist role for the whole task:\n\n${persona.systemPrompt.slice(0, 24_000)}`;
+  return `${BASE}\n\nAdopt this specialist role for the whole task:\n\n${persona.systemPrompt.slice(0, 24_000)}${memoryContext ? `\n\n${memoryContext}` : ''}`;
 }
 
-export async function runAgent(sessionId: string, goal: string, persona?: Persona, modelOverride?: ModelOverride) {
+export async function runAgent(sessionId: string, goal: string, persona?: Persona, modelOverride?: ModelOverride, memoryContext?: string) {
   const signal = sessionSignal(sessionId);
   const setStatus = (status: string, extra: Record<string, unknown> = {}) =>
     supabaseAdmin.from('sessions').update({ status, ...extra }).eq('id', sessionId);
@@ -52,7 +52,7 @@ export async function runAgent(sessionId: string, goal: string, persona?: Person
     const steering = takeSteeringMessages(sessionId);
 
     const msgs: ChatMessage[] = [
-      { role: 'system', content: system(persona) },
+      { role: 'system', content: system(persona, memoryContext) },
       { role: 'user', content: `Goal: ${goal}${researchContext ? `\n\n${researchContext}` : ''}${steering.length ? `\n\nUser steering:\n${steering.join('\n')}` : ''}\n\nReply with JSON only: {"steps": ["2 to 5 short imperative steps — keep this to 1-2 steps for a simple chat/research question, more only for an actual multi-part task"]}` },
     ];
     let steps = ['Answer the question'];
@@ -72,7 +72,7 @@ export async function runAgent(sessionId: string, goal: string, persona?: Person
     const finalSteering = takeSteeringMessages(sessionId);
     const answer = await chat(
       [
-        { role: 'system', content: system(persona) },
+        { role: 'system', content: system(persona, memoryContext) },
         { role: 'user', content: `Goal: ${goal}${researchContext ? `\n\n${researchContext}` : ''}\n\nPlan:\n${steps.map((s, i) => `${i + 1}. ${s}`).join('\n')}${finalSteering.length ? `\n\nAdditional user steering:\n${finalSteering.join('\n')}` : ''}\n\nCarry out the plan and give the full result.` },
       ],
       { maxTokens: 3000, signal },
@@ -106,6 +106,7 @@ export async function runAgentFollowup(
   beforeSeq: number,
   previousDurationSec: number | null | undefined,
   modelOverride?: ModelOverride,
+  memoryContext?: string,
 ) {
   const signal = sessionSignal(sessionId);
   const started = Date.now();
@@ -128,7 +129,7 @@ export async function runAgentFollowup(
     });
     const answer = await chat(
       buildFollowupMessages(
-        `${BASE}\n\nThis is an ongoing conversation. Answer the user's latest message directly using the full conversation context. Do not give a generic greeting or return JSON unless the user asks for JSON.`,
+        `${system(undefined, memoryContext)}\n\nThis is an ongoing conversation. Answer the user's latest message directly using the full conversation context. Do not give a generic greeting or return JSON unless the user asks for JSON.`,
         originalGoal,
         (history ?? []) as { type: string; payload: Record<string, unknown> }[],
         currentMessage,
