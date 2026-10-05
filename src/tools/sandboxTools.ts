@@ -129,6 +129,98 @@ export async function gitCommit(context: ToolContext, message: string) {
   return { sha, message };
 }
 
+function requireGitHubToken(context: ToolContext): GitHubExecutionContext {
+  if (!context.github?.token) throw new Error('Select a connected GitHub integration to use GitHub tools.');
+  return context.github;
+}
+
+function githubRepositoryTarget(context: ToolContext, repository?: string) {
+  const fullName = repository ?? context.github?.repository;
+  if (!fullName || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(fullName)) {
+    throw new Error('Select a repository or provide an owner/repository name for this GitHub action.');
+  }
+  const [owner, name] = fullName.split('/');
+  if (owner === '.' || owner === '..' || name === '.' || name === '..') throw new Error('Invalid GitHub repository name.');
+  return { owner, name, fullName };
+}
+
+async function githubRead<T>(context: ToolContext, path: string, verb: string, target: string): Promise<T> {
+  const github = requireGitHubToken(context);
+  await context.events.emit('action.started', { role: 'retriever', tool: 'github', verb, target });
+  try {
+    const response = await fetch(`https://api.github.com${path}`, {
+      headers: {
+        Accept: 'application/vnd.github+json',
+        Authorization: `Bearer ${github.token}`,
+        'User-Agent': 'klin-app',
+        'X-GitHub-Api-Version': '2022-11-28',
+      },
+      signal: AbortSignal.any([sessionSignal(context.sessionId), AbortSignal.timeout(20_000)]),
+    });
+    const body: any = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(`GitHub request failed (${response.status}): ${String(body.message ?? 'unknown error').slice(0, 200)}`);
+    await context.events.emit('action.completed', { tool: 'github', result: `${verb} completed` });
+    return body as T;
+  } catch (error) {
+    await context.events.emit('action.completed', { tool: 'github', result: `${verb} failed` });
+    throw error;
+  }
+}
+
+export async function githubListRepositories(context: ToolContext, limit = 20) {
+  if (!Number.isInteger(limit) || limit < 1 || limit > 50) throw new Error('repository limit must be between 1 and 50');
+  const rows = await githubRead<any[]>(context, `/user/repos?per_page=${limit}&sort=updated&affiliation=owner,collaborator,organization_member`, 'list_repositories', 'connected account');
+  if (!Array.isArray(rows)) throw new Error('GitHub returned an unexpected repository list.');
+  return rows.map((repo) => ({
+    fullName: repo.full_name,
+    private: Boolean(repo.private),
+    defaultBranch: repo.default_branch,
+    description: typeof repo.description === 'string' ? repo.description.slice(0, 300) : '',
+    url: repo.html_url,
+  }));
+}
+
+export async function githubGetIssue(context: ToolContext, number: number, repository?: string) {
+  if (!Number.isSafeInteger(number) || number < 1) throw new Error('issue number must be a positive integer');
+  const target = githubRepositoryTarget(context, repository);
+  const issue = await githubRead<any>(context, `/repos/${encodeURIComponent(target.owner)}/${encodeURIComponent(target.name)}/issues/${number}`, 'get_issue', `${target.fullName}#${number}`);
+  return {
+    repository: target.fullName,
+    number: issue.number,
+    title: issue.title,
+    state: issue.state,
+    url: issue.html_url,
+    author: issue.user?.login,
+    labels: Array.isArray(issue.labels) ? issue.labels.map((label: any) => label.name).slice(0, 20) : [],
+    body: typeof issue.body === 'string' ? issue.body.slice(0, 8_000) : '',
+    isPullRequest: Boolean(issue.pull_request),
+  };
+}
+
+export async function githubListIssues(context: ToolContext, state: 'open' | 'closed' | 'all' = 'open', limit = 20, repository?: string) {
+  if (!['open', 'closed', 'all'].includes(state)) throw new Error('issue state must be open, closed, or all');
+  if (!Number.isInteger(limit) || limit < 1 || limit > 50) throw new Error('issue limit must be between 1 and 50');
+  const target = githubRepositoryTarget(context, repository);
+  const rows = await githubRead<any[]>(context, `/repos/${encodeURIComponent(target.owner)}/${encodeURIComponent(target.name)}/issues?state=${state}&per_page=${limit}`, 'list_issues', target.fullName);
+  if (!Array.isArray(rows)) throw new Error('GitHub returned an unexpected issue list.');
+  return rows.filter((issue) => !issue.pull_request).map((issue) => ({
+    number: issue.number, title: issue.title, state: issue.state, url: issue.html_url,
+    author: issue.user?.login, labels: Array.isArray(issue.labels) ? issue.labels.map((label: any) => label.name).slice(0, 20) : [],
+  }));
+}
+
+export async function githubListPullRequests(context: ToolContext, state: 'open' | 'closed' | 'all' = 'open', limit = 20, repository?: string) {
+  if (!['open', 'closed', 'all'].includes(state)) throw new Error('pull request state must be open, closed, or all');
+  if (!Number.isInteger(limit) || limit < 1 || limit > 50) throw new Error('pull request limit must be between 1 and 50');
+  const target = githubRepositoryTarget(context, repository);
+  const rows = await githubRead<any[]>(context, `/repos/${encodeURIComponent(target.owner)}/${encodeURIComponent(target.name)}/pulls?state=${state}&per_page=${limit}`, 'list_pull_requests', target.fullName);
+  if (!Array.isArray(rows)) throw new Error('GitHub returned an unexpected pull request list.');
+  return rows.map((pull) => ({
+    number: pull.number, title: pull.title, state: pull.state, url: pull.html_url,
+    author: pull.user?.login, base: pull.base?.ref, head: pull.head?.ref, draft: Boolean(pull.draft),
+  }));
+}
+
 export async function gitPush(context: ToolContext) {
   const github = requireGitHubContext(context);
   const branch = (await exec(context, 'git branch --show-current', '/workspace', 10_000)).stdout.trim();
@@ -176,11 +268,11 @@ export async function githubCreatePullRequest(context: ToolContext, title: strin
   return { url: result.html_url, title: artifact.title, base: github.baseBranch, head: branch };
 }
 
-function requireGitHubContext(context: ToolContext): GitHubExecutionContext {
+function requireGitHubContext(context: ToolContext): GitHubExecutionContext & { repository: string; baseBranch: string; workBranch: string } {
   if (!context.github?.repository || !context.github.baseBranch || !context.github.workBranch || !context.github.token) {
     throw new Error('Connect GitHub and select a repository and base branch to use GitHub write actions.');
   }
-  return context.github;
+  return context.github as GitHubExecutionContext & { repository: string; baseBranch: string; workBranch: string };
 }
 
 function withGitHubAskpass(command: string) {

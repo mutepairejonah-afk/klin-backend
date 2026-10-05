@@ -41,9 +41,9 @@ export interface ToolEventSink {
 }
 
 export interface GitHubExecutionContext {
-  repository: string;
-  baseBranch: string;
-  workBranch: string;
+  repository?: string;
+  baseBranch?: string;
+  workBranch?: string;
   token: string;
   username?: string;
 }

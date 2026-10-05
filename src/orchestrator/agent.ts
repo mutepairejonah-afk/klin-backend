@@ -106,6 +106,7 @@ export async function runAgentFollowup(
   beforeSeq: number,
   previousDurationSec: number | null | undefined,
   modelOverride?: ModelOverride,
+  persona?: Persona,
 ) {
   const signal = sessionSignal(sessionId);
   const started = Date.now();
@@ -128,7 +129,7 @@ export async function runAgentFollowup(
     });
     const answer = await chat(
       buildFollowupMessages(
-        `${BASE}\n\nThis is an ongoing conversation. Answer the user's latest message directly using the full conversation context. Do not give a generic greeting or return JSON unless the user asks for JSON.`,
+        `${system(persona)}\n\nThis is an ongoing conversation. Keep the selected specialist role consistent, answer the user's latest message directly using the full conversation context, and do not give a generic greeting or return JSON unless the user asks for JSON.`,
         originalGoal,
         (history ?? []) as { type: string; payload: Record<string, unknown> }[],
         currentMessage,

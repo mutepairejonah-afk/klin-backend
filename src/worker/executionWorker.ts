@@ -17,6 +17,7 @@ export interface CodingJob {
   goal: string;
   repo?: string;
   branch?: string;
+  connectors?: string[];
   modelOverride?: ModelOverride;
   agent?: { slug: string; name: string; systemPrompt: string };
 }
@@ -90,9 +91,10 @@ export class ExecutionWorker {
 
       const context = { sessionId: job.sessionId, sandbox, runtime: this.runtime, events };
       let githubContext: GitHubExecutionContext | undefined;
+      const githubSelected = job.connectors?.includes('github') === true;
       if (job.repo) {
         const githubRepo = resolveGitHubRepo(job.repo);
-        const credentials = githubRepo
+        const credentials = githubRepo || githubSelected
           ? await getGitHubCredentials(job.orgId)
           : undefined;
         await gitClone(context, githubRepo?.url ?? job.repo, '.', credentials?.token, credentials?.username);
@@ -103,9 +105,12 @@ export class ExecutionWorker {
           const workBranch = `klin/${job.sessionId.slice(0, 8)}`;
           await gitBranch(context, workBranch);
           githubContext = { repository: githubRepo.fullName, baseBranch, workBranch, ...credentials };
+        } else if (githubSelected && credentials) {
+          githubContext = credentials;
         }
       } else {
         await restoreWorkspaceFiles(job.sessionId, context);
+        if (githubSelected) githubContext = await getGitHubCredentials(job.orgId);
       }
       await gitStatus(context);
       const result = await executeCodingTask(job.sessionId, job.orgId, job.goal, sandbox, this.runtime, job.modelOverride, undefined, events, githubContext, job.agent);

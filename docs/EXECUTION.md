@@ -60,6 +60,11 @@ behind OpenSandbox with gVisor, Kata, or Firecracker and a network policy.
 - `gitClone`, `gitStatus`, `gitDiff`, `gitBranch`, `gitCommit`: HTTPS-only clone,
   safe branch names, and local commits. Push/PR creation remains a separate
   approval-gated integration.
+- A selected GitHub connector enables read-only repository, issue, and pull
+  request lookups (including account repository listing when no repo was
+  selected). Its token stays in the worker and is never included in model
+  prompts or tool results. Commits, pushes, and PR creation remain individually
+  approval-gated; only the selected repository's feature branch can be pushed.
 - `runTests`: explicit command or conservative detection for npm, pytest, Go,
   and Cargo tests; emits a normalized `test.result` event.
 
@@ -71,7 +76,8 @@ code.
 
 1. `POST /sessions` routes explicit code/build/test requests to the sandbox
    worker whether or not `jobId` or `repo` is present. Plain chat stays on the
-   text agent. Sandbox requests require `KILN_EXECUTION_ENABLED=true` and
+   text agent. GitHub resource requests use the worker only when GitHub is
+   selected for that task. Sandbox requests require `KILN_EXECUTION_ENABLED=true` and
    `ORCHESTRATOR_MODE=coding`; if those are off, the backend fails honestly.
 2. The worker creates the container and volume, records `sandboxes`, and links
    `sessions.sandbox_id`.
@@ -85,6 +91,12 @@ code.
    approval gate.
 6. On failure or cancellation, the session is marked failed and the sandbox is
    destroyed unless explicitly retained for development diagnosis.
+
+The selected specialist profile is stored with the session and reused for
+follow-up chat and coding runs. Apply the additive
+`20261005000000_session_agent_profile.sql` migration before deploying this
+change. GitHub is currently the only provider with a live OAuth/execution path;
+other provider cards remain explicitly marked in development.
 
 The current queue is intentionally small and in-process. For multiple API
 instances, move `CodingJob` messages to BullMQ/Redis and run workers in a
