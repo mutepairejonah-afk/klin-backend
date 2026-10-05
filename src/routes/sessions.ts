@@ -47,7 +47,7 @@ const createSchema = z.object({
   jobId: z.string().nullish(),
   repo: z.string().optional(),
   branch: z.string().optional(),
-  connectors: z.array(z.string()).optional(),
+  connectors: z.array(z.string().min(1).max(80)).max(10).optional(),
   // Force this session into the sandbox even without a repo or job.
   sandbox: z.boolean().optional(),
   agent: z.object({ slug: z.string(), name: z.string(), systemPrompt: z.string().max(60_000) }).optional(),
@@ -58,6 +58,17 @@ router.post('/', async (req, res) => {
   const parsed = createSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.message });
   const input = parsed.data;
+  const selectedConnectors = [...new Set(input.connectors ?? [])];
+  const unsupportedConnectors = selectedConnectors.filter((id) => id !== 'github');
+  if (unsupportedConnectors.length) {
+    return res.status(400).json({ error: `These integrations are not available to agent tasks yet: ${unsupportedConnectors.join(', ')}.` });
+  }
+  if (selectedConnectors.includes('github')) {
+    const { data: connection, error: connectionError } = await req.db!.from('connections')
+      .select('connected').eq('org_id', req.orgId).eq('provider', 'github').maybeSingle();
+    if (connectionError) return res.status(500).json({ error: connectionError.message });
+    if (!connection?.connected) return res.status(409).json({ error: 'Connect GitHub before selecting it for an agent task.' });
+  }
 
   const { data, error } = await req.db!
     .from('sessions')
@@ -68,7 +79,8 @@ router.post('/', async (req, res) => {
       job_id: input.jobId ?? null,
       repo: input.repo,
       branch: input.branch,
-      connectors: input.connectors ?? [],
+      connectors: selectedConnectors,
+      agent_profile: input.agent ?? null,
       status: 'queued',
     })
     .select('*')
@@ -87,7 +99,7 @@ router.post('/', async (req, res) => {
   const codingRuntimeReady = process.env.KILN_EXECUTION_ENABLED === 'true' && process.env.ORCHESTRATOR_MODE === 'coding';
   const executionMode = resolveSessionExecutionMode(input, codingRuntimeReady);
   const run = executionMode === 'sandbox'
-    ? executionWorker.enqueue({ sessionId: data.id, orgId: req.orgId!, actor: req.user!.email, goal: input.goal, repo: input.repo, branch: input.branch, modelOverride, agent: input.agent })
+    ? executionWorker.enqueue({ sessionId: data.id, orgId: req.orgId!, actor: req.user!.email, goal: input.goal, repo: input.repo, branch: input.branch, connectors: selectedConnectors, modelOverride, agent: input.agent })
     : executionMode === 'chat' && llmConfigured()
       ? runAgent(data.id, input.goal, input.agent, modelOverride)
       : runUnavailableOrchestrator(data.id, input.goal);
@@ -209,7 +221,7 @@ router.post('/:id/message', async (req, res) => {
   if (!parsed.success) return res.status(400).json({ error: 'message must be 1–20000 characters' });
   const message = parsed.data.message;
   const { data: session, error: lookupError } = await req.db!.from('sessions')
-    .select('id,status,goal,repo,job_id,duration_sec')
+    .select('id,status,goal,repo,job_id,duration_sec,connectors,agent_profile')
     .eq('id', req.params.id).eq('org_id', req.orgId).maybeSingle();
   if (lookupError) return res.status(500).json({ error: lookupError.message });
   if (!session) return res.status(404).json({ error: 'not found' });
@@ -225,7 +237,7 @@ router.post('/:id/message', async (req, res) => {
     return res.status(409).json({ error: 'Start a new coding session to continue repository work.' });
   }
   const codingRuntimeReady = process.env.KILN_EXECUTION_ENABLED === 'true' && process.env.ORCHESTRATOR_MODE === 'coding';
-  const followupMode = resolveSessionExecutionMode({ goal: message }, codingRuntimeReady);
+  const followupMode = resolveSessionExecutionMode({ goal: message, connectors: session.connectors ?? [] }, codingRuntimeReady);
   if (followupMode === 'unavailable') {
     return res.status(503).json({ error: 'Sandbox execution is not configured on this server.' });
   }
@@ -252,7 +264,9 @@ router.post('/:id/message', async (req, res) => {
         orgId: req.orgId!,
         actor: req.user!.email,
         goal,
+        connectors: session.connectors ?? [],
         modelOverride,
+        agent: session.agent_profile ?? undefined,
       }).catch((err) => console.error('sandbox follow-up error', err));
     } else {
       void runAgentFollowup(
@@ -262,6 +276,7 @@ router.post('/:id/message', async (req, res) => {
         userEvent.seq,
         session.duration_sec,
         modelOverride,
+        session.agent_profile ?? undefined,
       );
     }
     return res.status(202).json({ accepted: true });

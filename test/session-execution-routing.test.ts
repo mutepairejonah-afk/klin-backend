@@ -14,6 +14,12 @@ test('jobless coding requests do not silently fall back to text chat when sandbo
 test('ordinary chat remains on the text-chat path', () => {
   assert.equal(resolveSessionExecutionMode({ goal: 'hi, what can you do?' }, true), 'chat');
   assert.equal(resolveSessionExecutionMode({ goal: 'explain how Python decorators work' }, true), 'chat');
+  assert.equal(resolveSessionExecutionMode({ goal: 'hi, what can you do?', connectors: ['github'] }, true), 'chat');
+});
+
+test('selected GitHub tasks use the isolated connector executor and fail honestly without a runtime', () => {
+  assert.equal(resolveSessionExecutionMode({ goal: 'List my open GitHub issues', connectors: ['github'] }, true), 'sandbox');
+  assert.equal(resolveSessionExecutionMode({ goal: 'List my open GitHub issues', connectors: ['github'] }, false), 'unavailable');
 });
 
 test('repository, job, and explicit sandbox selections still request isolated execution', () => {

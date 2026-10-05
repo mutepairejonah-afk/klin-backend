@@ -3,7 +3,8 @@ import { z } from 'zod';
 import { chat, type ChatMessage, type ModelOverride } from '../lib/llm.js';
 import { checkpoint, sessionSignal } from '../lib/sessionControl.js';
 import {
-  applyPatch, eventSink, gitBranch, gitCommit, gitDiff, gitPush, gitStatus, githubCreatePullRequest, listDir, readFile,
+  applyPatch, eventSink, gitBranch, gitCommit, gitDiff, gitPush, gitStatus, githubCreatePullRequest,
+  githubGetIssue, githubListIssues, githubListPullRequests, githubListRepositories, listDir, readFile,
   runTests, searchFiles, shellExec, writeFile,
 } from '../tools/sandboxTools.js';
 import type { GitHubExecutionContext, SandboxHandle, SandboxRuntime, ToolContext, ToolEventSink } from '../sandbox/types.js';
@@ -21,6 +22,10 @@ const actionSchema = z.union([
   z.object({ action: z.literal('git_commit'), message: z.string() }),
   z.object({ action: z.literal('git_push') }),
   z.object({ action: z.literal('github_create_pr'), title: z.string().min(1).max(256), body: z.string().max(20_000) }),
+  z.object({ action: z.literal('github_list_repositories'), limit: z.number().int().min(1).max(50).optional() }),
+  z.object({ action: z.literal('github_get_issue'), repository: z.string().optional(), number: z.number().int().positive() }),
+  z.object({ action: z.literal('github_list_issues'), repository: z.string().optional(), state: z.enum(['open', 'closed', 'all']).optional(), limit: z.number().int().min(1).max(50).optional() }),
+  z.object({ action: z.literal('github_list_pull_requests'), repository: z.string().optional(), state: z.enum(['open', 'closed', 'all']).optional(), limit: z.number().int().min(1).max(50).optional() }),
   z.object({ action: z.literal('run_tests'), command: z.string().optional(), timeoutMs: z.number().int().positive().max(900_000).optional() }),
   z.object({ action: z.literal('finish'), summary: z.string().min(1).max(4_000) }),
 ]);
@@ -45,17 +50,22 @@ Available actions:
 - {"action":"git_commit","message":"..."}
 - {"action":"git_push"} (requires approval; pushes the current feature branch, never merges)
 - {"action":"github_create_pr","title":"...","body":"..."} (requires approval; opens a PR into the selected base branch)
+- {"action":"github_list_repositories","limit":20} (read-only; requires the selected GitHub connector)
+- {"action":"github_get_issue","repository":"owner/repo","number":123} (read-only; repository may be omitted when selected)
+- {"action":"github_list_issues","repository":"owner/repo","state":"open","limit":20} (read-only)
+- {"action":"github_list_pull_requests","repository":"owner/repo","state":"open","limit":20} (read-only)
 - {"action":"run_tests","command":"npm test","timeoutMs":600000}
 - {"action":"finish","summary":"what was done and verified"}
 
 Rules:
-1. Work only inside /workspace. Never request credentials, Docker access, host paths, or network configuration.
+1. Work only inside /workspace. Never request credentials, Docker access, host paths, or network configuration. GitHub credentials stay outside the model transcript.
 2. Inspect before editing. Prefer small patches and preserve existing behavior.
 3. After any write or patch, run relevant tests before finishing. If tests fail, inspect and repair, up to the step limit.
 4. Do not claim a command ran unless its result is in the transcript.
 5. Each commit, push, and pull-request creation requires its own approval result in the transcript. If you changed a selected GitHub repository, prepare a tested feature-branch pull request; do not silently omit delivery.
 6. Keep work on the session feature branch. Never push the base branch or merge a pull request.
-7. Use finish only when the requested work is complete or a truthful blocker is reached.`;
+7. If GitHub is selected without a repository, use only its read-only account/repository/issue/PR actions; do not invent a workspace or modify code unless asked.
+8. Use finish only when the requested work is complete or a truthful blocker is reached.`;
 
 function parseAction(text: string): Action {
   const cleaned = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
@@ -120,6 +130,10 @@ async function executeAction(action: Action, context: ToolContext): Promise<unkn
     case 'git_commit': throw new Error('git_commit must pass through the approval gate');
     case 'git_push': throw new Error('git_push must pass through the approval gate');
     case 'github_create_pr': throw new Error('github_create_pr must pass through the approval gate');
+    case 'github_list_repositories': return githubListRepositories(context, action.limit ?? 20);
+    case 'github_get_issue': return githubGetIssue(context, action.number, action.repository);
+    case 'github_list_issues': return githubListIssues(context, action.state ?? 'open', action.limit ?? 20, action.repository);
+    case 'github_list_pull_requests': return githubListPullRequests(context, action.state ?? 'open', action.limit ?? 20, action.repository);
     case 'finish': return action;
   }
 }
@@ -144,7 +158,7 @@ export async function executeCodingTask(
     : EXECUTOR_SYSTEM;
   const messages: ChatMessage[] = [
     { role: 'system', content: executorInstructions },
-    { role: 'user', content: `User goal:\n${goal}\n\n${github ? `GitHub repository: ${github.repository}\nBase branch: ${github.baseBranch}\nWork branch: ${github.workBranch}\nAfter tests, prepare a feature-branch commit, push, and pull request. Each write action requires its own approval; never merge.` : ''}\nStart by inspecting the repository and then make the smallest correct change. Return one JSON action.` },
+    { role: 'user', content: `User goal:\n${goal}\n\n${github?.repository ? `GitHub repository: ${github.repository}\nBase branch: ${github.baseBranch}\nWork branch: ${github.workBranch}\nAfter tests, prepare a feature-branch commit, push, and pull request. Each write action requires its own approval; never merge.` : github?.token ? 'The GitHub connector is selected. Use its read-only tools when relevant; no repository workspace was selected.' : ''}\n${github?.repository ? 'Start by inspecting the repository and then make the smallest correct change.' : github?.token ? 'Use an available GitHub read action or answer the user. Do not make unrelated workspace changes.' : 'Start by inspecting the workspace and then make the smallest correct change.'} Return one JSON action.` },
   ];
   let changed = false;
   let testsRun = false;
