@@ -1,14 +1,15 @@
 import { Router } from 'express';
+import { z } from 'zod';
 import { appendAudit } from '../lib/audit.js';
 import { CONNECTOR_CATALOG } from '../lib/connectorCatalog.js';
+import { isManualConnector, verifyConnectorToken } from '../lib/connectorProviders.js';
 import { decrypt, encrypt, signState, verifyState } from '../lib/crypto.js';
 import { supabaseAdmin } from '../lib/supabase.js';
 import { requireOperator } from '../middleware/auth.js';
 
 const router = Router();
 
-// Providers with a real OAuth flow wired up below. Unsupported providers stay
-// visibly disconnected until their credentials flow is implemented.
+// GitHub uses OAuth; the other catalog providers use encrypted API tokens.
 const REAL_OAUTH = new Set(['github']);
 
 function backendUrl(req: import('express').Request) {
@@ -129,13 +130,31 @@ router.get('/', async (req, res) => {
   }));
 });
 
-// POST /connections/:id/connect — stub path for providers without a real
-// OAuth app registered yet. Real ones (github) should use /github/start instead.
+// POST /connections/:id/connect — validates and encrypts a provider token.
+// GitHub remains OAuth-only; all other catalog providers use this token flow.
 router.post('/:id/connect', requireOperator, async (req, res) => {
   const catalogEntry = CONNECTOR_CATALOG.find((c) => c.id === req.params.id);
   if (!catalogEntry) return res.status(404).json({ error: 'unknown connector' });
   if (REAL_OAUTH.has(req.params.id)) return res.status(400).json({ error: 'use the OAuth flow for this connector' });
-  return res.status(501).json({ error: `${catalogEntry.name} connection is not implemented yet` });
+  if (!isManualConnector(req.params.id)) return res.status(400).json({ error: 'connector authentication is not configured' });
+  const parsed = z.object({ token: z.string().trim().min(8).max(4096) }).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: 'a provider token is required' });
+  try {
+    const verified = await verifyConnectorToken(req.params.id, parsed.data.token);
+    const { data, error } = await req.db!.from('connections').upsert({
+      org_id: req.orgId, provider: req.params.id, connected: true,
+      scopes: verified.scopes, connected_at: new Date().toISOString(),
+      encrypted_credentials: encrypt(parsed.data.token), meta: verified.meta,
+    }, { onConflict: 'org_id,provider' }).select('*').single();
+    if (error) return res.status(500).json({ error: error.message });
+    await appendAudit({ orgId: req.orgId!, actor: req.user!.email, action: 'connection.connected', detail: req.params.id, ip: req.ip });
+    res.status(201).json({
+      id: catalogEntry.id, name: catalogEntry.name, description: catalogEntry.description,
+      scopes: data.scopes, connected: true, oauth: false, meta: data.meta, lastUsedAt: data.last_used_at ?? undefined,
+    });
+  } catch (error) {
+    res.status(422).json({ error: error instanceof Error ? error.message : 'credential validation failed' });
+  }
 });
 
 // DELETE /connections/:id

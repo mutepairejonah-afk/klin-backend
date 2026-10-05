@@ -54,6 +54,18 @@ const memberInput = z.object({
   role: z.enum(['owner', 'operator', 'viewer']),
 });
 
+membersRouter.get('/invitations', async (req, res) => {
+  const { data, error } = await req.db!.from('org_invitations')
+    .select('id, email, role, status, created_at')
+    .eq('org_id', req.orgId).eq('status', 'pending')
+    .order('created_at', { ascending: false }).limit(100);
+  if (error) return res.status(500).json({ error: error.message });
+  res.json((data ?? []).map((invite: any) => ({
+    id: invite.id, name: invite.email, email: invite.email, role: invite.role,
+    status: invite.status, createdAt: invite.created_at,
+  })));
+});
+
 membersRouter.get('/', async (req, res) => {
   const { data, error } = await req.db!.from('members').select('id, user_id, role').eq('org_id', req.orgId);
   if (error) return res.status(500).json({ error: error.message });

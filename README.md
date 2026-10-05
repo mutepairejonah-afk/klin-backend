@@ -151,10 +151,11 @@ once Clerk is confirmed working end to end.
 
 ## Connectors
 
-`GET /connections` merges a static catalog with each org's connected state. Only GitHub has a
-real OAuth flow wired up so far (`/connections/github/start` + `/connections/github/callback`).
-Unsupported providers return `501` and remain disconnected; they no longer create fake
-credentials. OAuth tokens and user secrets are stored encrypted (AES-256-GCM,
+`GET /connections` merges a static catalog with each org's connected state. GitHub uses the
+OAuth flow (`/connections/github/start` + `/connections/github/callback`). Neon, Supabase,
+Vercel, Fly.io, and Stripe use `POST /connections/:id/connect` with a provider token; the
+backend validates the token against the provider before storing it. Stripe is restricted to
+test-mode keys. OAuth tokens and provider tokens are stored encrypted (AES-256-GCM,
 `CONNECTION_ENC_KEY`) in
 `connections.encrypted_credentials`, not in plaintext.
 

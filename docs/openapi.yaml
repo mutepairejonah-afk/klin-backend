@@ -81,7 +81,11 @@ components:
       type: object
       properties:
         id: { type: string }
+        name: { type: string }
+        description: { type: string }
+        scopes: { type: array, items: { type: string } }
         connected: { type: boolean }
+        oauth: { type: boolean }
         meta: { type: object, nullable: true }
         lastUsedAt: { type: string, format: date-time, nullable: true }
     Schedule:
@@ -279,10 +283,22 @@ paths:
         '200': { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Connection' } } } } }
   /api/connections/{id}/connect:
     post:
-      summary: Connect a connector
+      summary: Validate and connect a provider token (GitHub uses OAuth)
       tags: [connections]
       parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
-      responses: { '200': { description: OK } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string, writeOnly: true, minLength: 8, maxLength: 4096 }
+      responses:
+        '201': { description: Connected after provider validation }
+        '400': { description: Invalid connector or OAuth provider }
+        '422': { description: Provider rejected the credential }
   /api/connections/{id}:
     delete:
       summary: Disconnect a connector
